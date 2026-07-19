@@ -1,0 +1,50 @@
+name: Deploy analytics app to Pages
+
+# Publishes analytics_marimo.py as a WebAssembly app to GitHub Pages.
+# This file goes at: .github/workflows/deploy-pages.yml
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - analytics_marimo.py
+      - .github/workflows/deploy-pages.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let only one Pages deploy run at a time
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install marimo
+        run: pip install marimo
+      - name: Export notebook to WebAssembly
+        run: marimo export html-wasm analytics_marimo.py -o _site --mode run
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
