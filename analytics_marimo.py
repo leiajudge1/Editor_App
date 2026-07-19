@@ -63,6 +63,8 @@ def _():
 @app.cell
 def _(COUNTRY_NAMES):
     import re
+    import io
+    from openpyxl import load_workbook
 
     def clean_doi(raw):
         s = str(raw).strip()
@@ -74,8 +76,6 @@ def _(COUNTRY_NAMES):
         return COUNTRY_NAMES.get((code or "").upper(), code or "Unknown")
 
     def dois_from_xlsx_bytes(data):
-        import io
-        from openpyxl import load_workbook
         out = []
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         for ws in wb.worksheets:
@@ -173,6 +173,13 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name):
     # ── Analysis + rendering (pure, no network) ───────────────────────────────
     from collections import Counter
     import datetime as dt
+    import io
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
 
     def summarise(records):
         n = len(records)
@@ -214,12 +221,6 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name):
         return rows
 
     def wheel_png(records):
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import io
-
         tc = Counter(r["topic"] for r in records)
         tsub = {}
         for r in records:
@@ -264,11 +265,7 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name):
         return buf.getvalue()
 
     def build_xlsx(records):
-        import io
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment
         s = summarise(records)
-        n = s["n"]
         wb = Workbook()
         ws = wb.active
         ws.title = "Science"
