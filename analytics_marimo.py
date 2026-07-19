@@ -309,44 +309,54 @@ def _(mo):
 @app.cell
 async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run):
     # Gate the heavy work behind the button + an uploaded file.
+    import traceback
     mo.stop(not run.value, mo.md("*Upload your QTS report, then press **Build my analytics**.*"))
     mo.stop(not file.value, mo.md("⚠️ No file uploaded yet."))
 
-    _dois = dois_from_xlsx_bytes(file.contents())
-    mo.stop(not _dois, mo.md("⚠️ No DOIs found in that spreadsheet."))
-
     records = []
-    with mo.status.progress_bar(total=len(_dois), title="Fetching from OpenAlex") as bar:
-        for _d in _dois:
-            _data = await fetch_openalex(_d)
-            if _data:
-                records.append(extract(_d, _data))
-            bar.update()
-    records
+    _err = None
+    try:
+        _dois = dois_from_xlsx_bytes(file.contents())
+        if not _dois:
+            _err = "No DOIs found in that spreadsheet."
+        else:
+            with mo.status.progress_bar(total=len(_dois), title="Fetching from OpenAlex") as bar:
+                for _d in _dois:
+                    _data = await fetch_openalex(_d)
+                    if _data:
+                        records.append(extract(_d, _data))
+                    bar.update()
+    except Exception:
+        _err = traceback.format_exc()
+
+    (mo.md("### ⚠️ Error while fetching\n\n```\n{}\n```".format(_err)) if _err
+     else mo.md("Fetched **{}** of {} papers.".format(len(records), len(_dois))))
     return (records,)
 
 
 @app.cell
 def _(build_xlsx, highlights, mo, records, summarise, wheel_png):
     mo.stop(not records, mo.md(""))
-
-    _s = summarise(records)
-    _png = wheel_png(records)
-
-    _intl_pct = (_s["intl"] / _s["n"]) if _s["n"] else 0
-    _summary = mo.md(
-        "### {} papers · {}\n\n"
-        "**{}** fields · **{}** subfields · **{}** topics · "
-        "**{}** countries · **{:.0%}** international".format(
-            _s["n"], _s["range"], len(_s["field"]), len(_s["subfield"]),
-            len(_s["topic"]), len(_s["country"]), _intl_pct)
-    )
-    _wheel = mo.image(_png, width=620) if _png else mo.md("*No topic data.*")
-    _dl = mo.download(data=build_xlsx(records), filename="portfolio_analytics.xlsx",
-                      label="Download full workbook (.xlsx)")
-    _table = mo.ui.table(highlights(records), selection=None, label="Highlights")
-
-    mo.vstack([_summary, _wheel, _dl, mo.md("### Highlights"), _table])
+    import traceback
+    try:
+        _s = summarise(records)
+        _png = wheel_png(records)
+        _intl_pct = (_s["intl"] / _s["n"]) if _s["n"] else 0
+        _summary = mo.md(
+            "### {} papers · {}\n\n"
+            "**{}** fields · **{}** subfields · **{}** topics · "
+            "**{}** countries · **{:.0%}** international".format(
+                _s["n"], _s["range"], len(_s["field"]), len(_s["subfield"]),
+                len(_s["topic"]), len(_s["country"]), _intl_pct))
+        _wheel = mo.image(_png, width=620) if _png else mo.md("*No topic data.*")
+        _dl = mo.download(data=build_xlsx(records), filename="portfolio_analytics.xlsx",
+                          label="Download full workbook (.xlsx)")
+        _table = mo.ui.table(highlights(records), selection=None, label="Highlights")
+        _out = mo.vstack([_summary, _wheel, _dl, mo.md("### Highlights"), _table])
+    except Exception:
+        _out = mo.md("### ⚠️ Error while building the report\n\n```\n{}\n```".format(
+            traceback.format_exc()))
+    _out
     return
 
 
