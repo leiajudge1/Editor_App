@@ -310,6 +310,7 @@ def _(mo):
 async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run):
     # Gate the heavy work behind the button + an uploaded file.
     import traceback
+    import asyncio
     mo.stop(not run.value, mo.md("*Upload your QTS report, then press **Build my analytics**.*"))
     mo.stop(not file.value, mo.md("⚠️ No file uploaded yet."))
 
@@ -320,12 +321,17 @@ async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run):
         if not _dois:
             _err = "No DOIs found in that spreadsheet."
         else:
-            with mo.status.progress_bar(total=len(_dois), title="Fetching from OpenAlex") as bar:
-                for _d in _dois:
+            with mo.status.progress_bar(
+                total=len(_dois), title="Fetching from OpenAlex",
+                subtitle="First run downloads the Python packages — hang on a moment.",
+            ) as bar:
+                for _i, _d in enumerate(_dois):
                     _data = await fetch_openalex(_d)
                     if _data:
                         records.append(extract(_d, _data))
-                    bar.update()
+                    bar.update(subtitle="{} of {} papers".format(_i + 1, len(_dois)))
+                    # Yield to the browser so the progress bar actually repaints.
+                    await asyncio.sleep(0)
     except Exception:
         _err = traceback.format_exc()
 
