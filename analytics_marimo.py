@@ -12,10 +12,12 @@ def _():
 
 @app.cell
 def _():
-    # Environment detection: browser (Pyodide/WASM) vs local Python.
+    # Environment detection + shared stdlib imports (defined once).
     import sys
+    import io
+    import traceback
     IS_WASM = ("pyodide" in sys.modules) or sys.platform == "emscripten"
-    return IS_WASM, sys
+    return IS_WASM, io, traceback
 
 
 @app.cell
@@ -61,9 +63,8 @@ def _():
 
 
 @app.cell
-def _(COUNTRY_NAMES):
+def _(COUNTRY_NAMES, io):
     import re
-    import io
     from openpyxl import load_workbook
 
     def clean_doi(raw):
@@ -169,11 +170,10 @@ def _(IS_WASM):
 
 
 @app.cell
-def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name):
+def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io):
     # ── Analysis + rendering (pure, no network) ───────────────────────────────
     from collections import Counter
     import datetime as dt
-    import io
     import numpy as np
     import matplotlib
     matplotlib.use("Agg")
@@ -307,9 +307,8 @@ def _(mo):
 
 
 @app.cell
-async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run):
+async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run, traceback):
     # Gate the heavy work behind the button + an uploaded file.
-    import traceback
     import asyncio
     mo.stop(not run.value, mo.md("*Upload your QTS report, then press **Build my analytics**.*"))
     mo.stop(not file.value, mo.md("⚠️ No file uploaded yet."))
@@ -341,9 +340,8 @@ async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run):
 
 
 @app.cell
-def _(build_xlsx, highlights, mo, records, summarise, wheel_png):
+def _(build_xlsx, highlights, mo, records, summarise, traceback, wheel_png):
     mo.stop(not records, mo.md(""))
-    import traceback
     try:
         _s = summarise(records)
         _png = wheel_png(records)
