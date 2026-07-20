@@ -37,12 +37,9 @@ def _(mo):
         # Editor portfolio analytics
 
         Upload your **QTS report** (Excel) — the DOI column is read for you — and
-        get your portfolio's scientific spread, geographic spread, and current
-        standouts. Everything runs **in your browser**: your file never leaves
-        your machine, and there are no accounts or keys.
-
-        *Altmetric scores aren't included here (they need a private key); this
-        view is powered entirely by the open OpenAlex database.*
+        get your portfolio's scientific spread, geographic spread, citation and
+        attention performance, and current standouts. Everything runs **in your
+        browser**: your file never leaves your machine.
         """
     )
     return
@@ -57,7 +54,7 @@ def _():
     WHEEL_TOP_N = 32
     # Paste your deployed Cloudflare Worker URL here to add Altmetric scores.
     # Leave it empty ("") to run without Altmetric.
-    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev"
+    WORKER_URL = ""
     COUNTRY_NAMES = {
         "US": "United States", "GB": "United Kingdom", "CN": "China",
         "DE": "Germany", "FR": "France", "JP": "Japan", "CA": "Canada",
@@ -208,10 +205,9 @@ def _(IS_WASM, WORKER_URL):
 
 
 @app.cell
-def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
+def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
     # ── Analysis + rendering (pure, no network) ───────────────────────────────
     from collections import Counter
-    import datetime as dt
     import numpy as np
     import matplotlib
     matplotlib.use("Agg")
@@ -234,58 +230,34 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
             "range": ("{} to {}".format(min(dated), max(dated)) if dated else "-"),
         }
 
-    def highlights(records):
-        today = dt.date.today()
-
-        def recent(r):
-            try:
-                return (today - dt.date.fromisoformat(r["date"])).days <= RECENT_DAYS
-            except (ValueError, TypeError):
-                return False
-
-        def fwci(r):
-            return r["fwci"] if isinstance(r["fwci"], (int, float)) else -1
-
-        def alt(r):
-            v = r.get("altmetric")
+    def perf_rows(records, key):
+        """All papers as rows, sorted by the given metric (desc).
+        key is one of 'citations', 'fwci', 'altmetric'."""
+        def val(r):
+            v = r.get(key)
             return v if isinstance(v, (int, float)) else -1
-
-        def row(why, r):
-            return {"Why": why, "DOI": r["doi"], "Title": r["title"],
-                    "Published": r["date"], "Citations": r["citations"],
-                    "FWCI": r["fwci"], "Altmetric": r.get("altmetric")}
-
-        rows = []
-        for r in sorted([x for x in records if recent(x)], key=fwci, reverse=True)[:TOP_N]:
-            rows.append(row("Recent (<{}d)".format(RECENT_DAYS), r))
-        for r in sorted(records, key=fwci, reverse=True)[:TOP_N]:
-            if fwci(r) > 0:
-                rows.append(row("Top FWCI", r))
-        if any(alt(r) > 0 for r in records):
-            for r in sorted(records, key=alt, reverse=True)[:TOP_N]:
-                if alt(r) > 0:
-                    rows.append(row("Top Altmetric", r))
-        return rows
+        return [{"DOI": r["doi"], "Title": r["title"], "Published": r["date"],
+                 "Citations": r["citations"], "FWCI": r["fwci"],
+                 "Altmetric": r.get("altmetric")}
+                for r in sorted(records, key=val, reverse=True)]
 
     def wheel_png(records):
         tc = Counter(r["topic"] for r in records)
-        tsub = {}
-        for r in records:
-            tsub.setdefault(r["topic"], r["subfield"])
         total = len(tc)
+        # Biggest topics first; each topic is its own wedge and its own colour.
         selected = [t for t, _ in tc.most_common(WHEEL_TOP_N)]
-        selected.sort(key=lambda t: (tsub.get(t, ""), -tc[t]))
         counts = [tc[t] for t in selected]
-        groups = [tsub.get(t, "Other") for t in selected]
-        uniq = list(dict.fromkeys(groups))
-        pal = plt.get_cmap("tab20")
-        gcol = {g: pal(i % 20) for i, g in enumerate(uniq)}
-        colors = [gcol[g] for g in groups]
         if not selected:
             return None
+        # A distinct colour per topic: stitch together several qualitative maps.
+        palette = []
+        for cmap_name in ("tab20", "tab20b", "tab20c"):
+            palette.extend(plt.get_cmap(cmap_name).colors)
+        colors = [palette[i % len(palette)] for i in range(len(selected))]
+
         ang = np.linspace(0, 2 * np.pi, len(selected), endpoint=False)
         rmax = max(counts)
-        fig = plt.figure(figsize=(8, 8))
+        fig = plt.figure(figsize=(9, 9))
         ax = fig.add_subplot(111, projection="polar")
         ax.set_theta_offset(np.pi / 2)
         ax.set_theta_direction(-1)
@@ -299,12 +271,16 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
             if c >= max(2, rmax * 0.25):
                 ax.text(a, c / 2, str(c), ha="center", va="center",
                         fontsize=6.5, color="white", weight="bold")
-        handles = [plt.Rectangle((0, 0), 1, 1, color=gcol[g]) for g in uniq]
-        ax.legend(handles, uniq, loc="center left", bbox_to_anchor=(1.02, 0.5),
-                  fontsize=7.5, frameon=False, title="Subfield",
-                  ncol=2 if len(uniq) > 6 else 1)
+        # Legend of topics (truncate long names so it stays readable).
+        def _short(t):
+            return t if len(t) <= 42 else t[:39] + "…"
+        handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i])
+                   for i in range(len(selected))]
+        ax.legend(handles, [_short(t) for t in selected], loc="center left",
+                  bbox_to_anchor=(1.02, 0.5), fontsize=6.5, frameon=False,
+                  title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
-        ax.set_title("Portfolio by topic ({}), grouped by subfield".format(shown),
+        ax.set_title("Portfolio by topic ({})".format(shown),
                      fontsize=13, pad=24, weight="bold")
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
@@ -342,7 +318,7 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
         wb.save(out)
         return out.getvalue()
 
-    return build_xlsx, highlights, summarise, wheel_png
+    return build_xlsx, perf_rows, summarise, wheel_png
 
 
 @app.cell
@@ -396,7 +372,7 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 
 
 @app.cell
-def _(build_xlsx, highlights, mo, records, summarise, traceback, wheel_png):
+def _(build_xlsx, perf_rows, mo, records, summarise, traceback, wheel_png):
     mo.stop(not records, mo.md(""))
     try:
         _s = summarise(records)
@@ -408,11 +384,25 @@ def _(build_xlsx, highlights, mo, records, summarise, traceback, wheel_png):
             "**{}** countries · **{:.0%}** international".format(
                 _s["n"], _s["range"], len(_s["field"]), len(_s["subfield"]),
                 len(_s["topic"]), len(_s["country"]), _intl_pct))
-        _wheel = mo.image(_png, width=620) if _png else mo.md("*No topic data.*")
+        _wheel = mo.image(_png, width=680) if _png else mo.md("*No topic data.*")
         _dl = mo.download(data=build_xlsx(records), filename="portfolio_analytics.xlsx",
                           label="Download full workbook (.xlsx)")
-        _table = mo.ui.table(highlights(records), selection=None, label="Highlights")
-        _out = mo.vstack([_summary, _wheel, _dl, mo.md("### Highlights"), _table])
+        # Interactive, sortable/searchable tables — one per performance metric.
+        _tabs = mo.ui.tabs({
+            "Citations": mo.ui.table(perf_rows(records, "citations"),
+                                     selection=None, pagination=True, page_size=15),
+            "FWCI": mo.ui.table(perf_rows(records, "fwci"),
+                                selection=None, pagination=True, page_size=15),
+            "Altmetric": mo.ui.table(perf_rows(records, "altmetric"),
+                                     selection=None, pagination=True, page_size=15),
+        })
+        _out = mo.vstack([
+            _summary,
+            mo.md("### Topic wheel"), _wheel,
+            mo.md("### Performance — ranked by each metric (click a column to re-sort)"),
+            _tabs,
+            _dl,
+        ])
     except Exception:
         _out = mo.md("### ⚠️ Error while building the report\n\n```\n{}\n```".format(
             traceback.format_exc()))
