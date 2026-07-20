@@ -55,6 +55,9 @@ def _():
     RECENT_DAYS = 60
     TOP_N = 12
     WHEEL_TOP_N = 32
+    # Paste your deployed Cloudflare Worker URL here to add Altmetric scores.
+    # Leave it empty ("") to run without Altmetric.
+    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev"
     COUNTRY_NAMES = {
         "US": "United States", "GB": "United Kingdom", "CN": "China",
         "DE": "Germany", "FR": "France", "JP": "Japan", "CA": "Canada",
@@ -69,7 +72,7 @@ def _():
         "AR": "Argentina", "CL": "Chile", "IR": "Iran", "TH": "Thailand",
         "MY": "Malaysia", "LU": "Luxembourg", "SI": "Slovenia", "EE": "Estonia",
     }
-    return BRAND, COUNTRY_NAMES, RECENT_DAYS, TOP_N, WHEEL_TOP_N
+    return BRAND, COUNTRY_NAMES, RECENT_DAYS, TOP_N, WHEEL_TOP_N, WORKER_URL
 
 
 @app.cell
@@ -148,7 +151,7 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
 
 
 @app.cell
-def _(IS_WASM):
+def _(IS_WASM, WORKER_URL):
     # ── Cross-environment OpenAlex fetch ──────────────────────────────────────
     # Browser: pyodide.http.pyfetch (async). Local: urllib (stdlib).
     async def fetch_openalex(doi, mailto=""):
@@ -176,7 +179,32 @@ def _(IS_WASM):
                 if e.code == 404:
                     return None
                 raise
-    return (fetch_openalex,)
+
+    async def fetch_altmetric(dois):
+        # Ask the Cloudflare Worker for Altmetric scores. Returns {doi_lower: score}.
+        # Empty dict if WORKER_URL isn't set or anything goes wrong (non-fatal).
+        import json
+        if not WORKER_URL:
+            return {}
+        payload = json.dumps({"dois": dois})
+        if IS_WASM:
+            from pyodide.http import pyfetch
+            resp = await pyfetch(WORKER_URL, method="POST",
+                                 headers={"Content-Type": "application/json"},
+                                 body=payload)
+            if resp.status != 200:
+                return {}
+            data = await resp.json()
+        else:
+            import urllib.request
+            req = urllib.request.Request(
+                WORKER_URL, data=payload.encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        return data.get("scores", {}) or {}
+
+    return fetch_altmetric, fetch_openalex
 
 
 @app.cell
@@ -218,16 +246,25 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
         def fwci(r):
             return r["fwci"] if isinstance(r["fwci"], (int, float)) else -1
 
+        def alt(r):
+            v = r.get("altmetric")
+            return v if isinstance(v, (int, float)) else -1
+
+        def row(why, r):
+            return {"Why": why, "DOI": r["doi"], "Title": r["title"],
+                    "Published": r["date"], "Citations": r["citations"],
+                    "FWCI": r["fwci"], "Altmetric": r.get("altmetric")}
+
         rows = []
         for r in sorted([x for x in records if recent(x)], key=fwci, reverse=True)[:TOP_N]:
-            rows.append({"Why": "Recent (<{}d)".format(RECENT_DAYS), "DOI": r["doi"],
-                         "Title": r["title"], "Published": r["date"],
-                         "Citations": r["citations"], "FWCI": r["fwci"]})
+            rows.append(row("Recent (<{}d)".format(RECENT_DAYS), r))
         for r in sorted(records, key=fwci, reverse=True)[:TOP_N]:
             if fwci(r) > 0:
-                rows.append({"Why": "Top FWCI", "DOI": r["doi"], "Title": r["title"],
-                             "Published": r["date"], "Citations": r["citations"],
-                             "FWCI": r["fwci"]})
+                rows.append(row("Top FWCI", r))
+        if any(alt(r) > 0 for r in records):
+            for r in sorted(records, key=alt, reverse=True)[:TOP_N]:
+                if alt(r) > 0:
+                    rows.append(row("Top Altmetric", r))
         return rows
 
     def wheel_png(records):
@@ -292,15 +329,15 @@ def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
         wb.create_sheet("Papers")
         wp = wb["Papers"]
         heads = ["DOI", "Title", "Published", "Citations", "FWCI",
-                 "Field", "Subfield", "Topic", "Countries"]
+                 "Altmetric", "Field", "Subfield", "Topic", "Countries"]
         for c, h in enumerate(heads, 1):
             wp.cell(row=1, column=c, value=h).font = Font(bold=True)
         for i, r in enumerate(records, start=2):
             for c, key in enumerate(
-                    ["doi", "title", "date", "citations", "fwci", "field",
-                     "subfield", "topic"], 1):
-                wp.cell(row=i, column=c, value=r[key])
-            wp.cell(row=i, column=9, value=", ".join(r["countries"]))
+                    ["doi", "title", "date", "citations", "fwci", "altmetric",
+                     "field", "subfield", "topic"], 1):
+                wp.cell(row=i, column=c, value=r.get(key))
+            wp.cell(row=i, column=10, value=", ".join(r["countries"]))
         out = io.BytesIO()
         wb.save(out)
         return out.getvalue()
@@ -317,7 +354,7 @@ def _(mo):
 
 
 @app.cell
-async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run, traceback):
+async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file, mo, run, traceback, WORKER_URL):
     # Gate the heavy work behind the button + an uploaded file.
     import asyncio
     mo.stop(not run.value, mo.md("*Upload your QTS report, then press **Build my analytics**.*"))
@@ -341,6 +378,15 @@ async def _(dois_from_xlsx_bytes, fetch_openalex, extract, file, mo, run, traceb
                     bar.update(subtitle="{} of {} papers".format(_i + 1, len(_dois)))
                     # Yield to the browser so the progress bar actually repaints.
                     await asyncio.sleep(0)
+            # Optional Altmetric scores (only if a Worker URL is configured).
+            if WORKER_URL and records:
+                with mo.status.spinner(title="Fetching Altmetric scores…"):
+                    try:
+                        _scores = await fetch_altmetric([r["doi"] for r in records])
+                    except Exception:
+                        _scores = {}
+                for r in records:
+                    r["altmetric"] = _scores.get(r["doi"].lower())
     except Exception:
         _err = traceback.format_exc()
 
