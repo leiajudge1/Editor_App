@@ -11,13 +11,23 @@ def _():
 
 
 @app.cell
-def _():
+async def _():
     # Environment detection + shared stdlib imports (defined once).
     import sys
     import io
     import traceback
     IS_WASM = ("pyodide" in sys.modules) or sys.platform == "emscripten"
-    return IS_WASM, io, traceback
+    # openpyxl isn't in Pyodide's preloaded set, so install it on demand in the
+    # browser. Cells that import openpyxl depend on openpyxl_ready, so this runs
+    # first.
+    if IS_WASM:
+        import micropip
+        try:
+            import openpyxl  # noqa: F401
+        except ModuleNotFoundError:
+            await micropip.install("openpyxl")
+    openpyxl_ready = True
+    return IS_WASM, io, openpyxl_ready, traceback
 
 
 @app.cell
@@ -63,7 +73,7 @@ def _():
 
 
 @app.cell
-def _(COUNTRY_NAMES, io):
+def _(COUNTRY_NAMES, io, openpyxl_ready):
     import re
     from openpyxl import load_workbook
 
@@ -170,7 +180,7 @@ def _(IS_WASM):
 
 
 @app.cell
-def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io):
+def _(RECENT_DAYS, TOP_N, WHEEL_TOP_N, country_name, io, openpyxl_ready):
     # ── Analysis + rendering (pure, no network) ───────────────────────────────
     from collections import Counter
     import datetime as dt
