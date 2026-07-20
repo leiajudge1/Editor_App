@@ -51,7 +51,7 @@ def _():
     WHEEL_TOP_N = 32
     # Paste your deployed Cloudflare Worker URL here to add Altmetric scores.
     # Leave it empty ("") to run without Altmetric.
-    WORKER_URL = ""
+    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev"
     COUNTRY_NAMES = {
         "US": "United States", "GB": "United Kingdom", "CN": "China",
         "DE": "Germany", "FR": "France", "JP": "Japan", "CA": "Canada",
