@@ -277,7 +277,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i])
                    for i in range(len(selected))]
         ax.legend(handles, [_short(t) for t in selected], loc="center left",
-                  bbox_to_anchor=(1.02, 0.5), fontsize=6.5, frameon=False,
+                  bbox_to_anchor=(1.02, 0.5), fontsize=10.5, frameon=False,
                   title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
