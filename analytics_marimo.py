@@ -319,8 +319,8 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         wb.save(out)
         return out.getvalue()
 
-   def bubble_fig(records):
-        # x = citations, y = FWCI, size = Altmetric (by rank, so it's dynamic).
+    def bubble_fig(records):
+        # x = citations, y = FWCI, size = Altmetric; hover shows the paper.
         xs, ys, sizes, texts, links = [], [], [], [], []
         for r in records:
             xs.append(r["citations"] if isinstance(r["citations"], (int, float)) else 0)
@@ -329,26 +329,17 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
             sizes.append(a if isinstance(a, (int, float)) else 0)
             texts.append((r["title"] or "")[:90])
             links.append("https://doi.org/" + r["doi"])
-        # Rank-based sizing spreads bubbles evenly regardless of how skewed the
-        # raw scores are, so differences are actually visible.
-        n = len(sizes)
-        if n and max(sizes) != min(sizes):
-            order = sorted(range(n), key=lambda i: sizes[i])
-            rank = [0] * n
-            for pos, i in enumerate(order):
-                rank[i] = pos
-            msize = [7 + 40 * (rank[i] / (n - 1)) for i in range(n)]
-        else:
-            msize = [16] * n
+        smax = max(sizes) if sizes else 0
+        msize = [9 + 34 * ((s / smax) ** 0.5) if smax else 12 for s in sizes]
         fig = go.Figure(go.Scatter(
             x=xs, y=ys, mode="markers",
             marker=dict(size=msize, color=ys, colorscale="Viridis", showscale=False,
                         line=dict(width=0.5, color="white"), opacity=0.75),
             customdata=links, text=texts,
             hovertemplate=("<b>%{text}</b><br>Citations: %{x}<br>FWCI: %{y:.2f}"
-                           "<br>Altmetric size-ranked<extra></extra>")))
+                           "<br>%{customdata}<extra></extra>")))
         fig.update_layout(xaxis_title="Citations", yaxis_title="FWCI",
-                          height=520, template="simple_white", dragmode="select",
+                          height=520, template="simple_white",
                           margin=dict(l=50, r=20, t=20, b=45))
         return fig
 
