@@ -22,10 +22,7 @@ async def _():
     # first.
     if IS_WASM:
         import micropip
-        try:
-            import openpyxl  # noqa: F401
-        except ModuleNotFoundError:
-            await micropip.install("openpyxl")
+        await micropip.install(["openpyxl", "plotly"])
     openpyxl_ready = True
     return IS_WASM, io, openpyxl_ready, traceback
 
@@ -54,7 +51,7 @@ def _():
     WHEEL_TOP_N = 32
     # Paste your deployed Cloudflare Worker URL here to add Altmetric scores.
     # Leave it empty ("") to run without Altmetric.
-    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev"
+    WORKER_URL = ""
     COUNTRY_NAMES = {
         "US": "United States", "GB": "United Kingdom", "CN": "China",
         "DE": "Germany", "FR": "France", "JP": "Japan", "CA": "Canada",
@@ -212,6 +209,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import plotly.graph_objects as go
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
@@ -241,7 +239,9 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
                  "Altmetric": r.get("altmetric")}
                 for r in sorted(records, key=val, reverse=True)]
 
-    def wheel_png(records):
+    def wheel_png(records, only_subfield=None):
+        if only_subfield and only_subfield != "All":
+            records = [r for r in records if r["subfield"] == only_subfield]
         tc = Counter(r["topic"] for r in records)
         total = len(tc)
         # Biggest topics first; each topic is its own wedge and its own colour.
@@ -280,7 +280,8 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
                   bbox_to_anchor=(1.02, 0.5), fontsize=6.5, frameon=False,
                   title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
-        ax.set_title("Portfolio by topic ({})".format(shown),
+        scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
+        ax.set_title("Portfolio by topic ({}){}".format(shown, scope),
                      fontsize=13, pad=24, weight="bold")
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
@@ -318,7 +319,42 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         wb.save(out)
         return out.getvalue()
 
-    return build_xlsx, perf_rows, summarise, wheel_png
+    def bubble_fig(records):
+        # x = citations, y = FWCI, size = Altmetric; hover shows the paper.
+        xs, ys, sizes, texts, links = [], [], [], [], []
+        for r in records:
+            xs.append(r["citations"] if isinstance(r["citations"], (int, float)) else 0)
+            ys.append(r["fwci"] if isinstance(r["fwci"], (int, float)) else 0)
+            a = r.get("altmetric")
+            sizes.append(a if isinstance(a, (int, float)) else 0)
+            texts.append((r["title"] or "")[:90])
+            links.append("https://doi.org/" + r["doi"])
+        smax = max(sizes) if sizes else 0
+        msize = [9 + 34 * ((s / smax) ** 0.5) if smax else 12 for s in sizes]
+        fig = go.Figure(go.Scatter(
+            x=xs, y=ys, mode="markers",
+            marker=dict(size=msize, color=ys, colorscale="Viridis", showscale=False,
+                        line=dict(width=0.5, color="white"), opacity=0.75),
+            customdata=links, text=texts,
+            hovertemplate=("<b>%{text}</b><br>Citations: %{x}<br>FWCI: %{y:.2f}"
+                           "<br>%{customdata}<extra></extra>")))
+        fig.update_layout(xaxis_title="Citations", yaxis_title="FWCI",
+                          height=520, template="simple_white",
+                          margin=dict(l=50, r=20, t=20, b=45))
+        return fig
+
+    def country_fig(records):
+        cc = Counter(c for r in records for c in r["countries"])
+        top = cc.most_common(10)[::-1]
+        fig = go.Figure(go.Bar(
+            x=[n for _, n in top], y=[country_name(c) for c, _ in top],
+            orientation="h", marker_color="#5B2C6F",
+            hovertemplate="%{y}: %{x} papers<extra></extra>"))
+        fig.update_layout(height=380, template="simple_white",
+                          xaxis_title="Papers", margin=dict(l=10, r=10, t=10, b=30))
+        return fig
+
+    return bubble_fig, build_xlsx, country_fig, perf_rows, summarise, wheel_png
 
 
 @app.cell
@@ -372,11 +408,22 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 
 
 @app.cell
-def _(build_xlsx, perf_rows, mo, records, summarise, traceback, wheel_png):
+def _(bubble_fig, mo, records, summarise):
+    # UI elements live in their own cell so their .value changes drive updates.
+    mo.stop(not records, mo.md(""))
+    _subs = sorted(summarise(records)["subfield"].keys())
+    subfield_dd = mo.ui.dropdown(options=["All"] + _subs, value="All",
+                                 label="Filter the topic wheel by subfield")
+    bubble = mo.ui.plotly(bubble_fig(records))
+    return bubble, subfield_dd
+
+
+@app.cell
+def _(bubble, build_xlsx, country_fig, perf_rows, mo, records, subfield_dd,
+      summarise, traceback, wheel_png):
     mo.stop(not records, mo.md(""))
     try:
         _s = summarise(records)
-        _png = wheel_png(records)
         _intl_pct = (_s["intl"] / _s["n"]) if _s["n"] else 0
         _summary = mo.md(
             "### {} papers · {}\n\n"
@@ -384,23 +431,42 @@ def _(build_xlsx, perf_rows, mo, records, summarise, traceback, wheel_png):
             "**{}** countries · **{:.0%}** international".format(
                 _s["n"], _s["range"], len(_s["field"]), len(_s["subfield"]),
                 len(_s["topic"]), len(_s["country"]), _intl_pct))
-        _wheel = mo.image(_png, width=680) if _png else mo.md("*No topic data.*")
-        _dl = mo.download(data=build_xlsx(records), filename="portfolio_analytics.xlsx",
+
+        # Clicked bubble -> surface the paper's link (opens in a new tab).
+        _clicked = mo.md("*Tip: hover a bubble for the paper; click one to get its link.*")
+        try:
+            _pts = bubble.value or []
+            if _pts:
+                _url = _pts[0].get("customdata")
+                if isinstance(_url, (list, tuple)):
+                    _url = _url[0]
+                if _url:
+                    _clicked = mo.md("**Selected paper:** [{}]({})".format(_url, _url))
+        except Exception:
+            pass
+
+        _wheel = mo.image(wheel_png(records, subfield_dd.value), width=680)
+        _country = mo.ui.plotly(country_fig(records))
+
+        # DOIs render as clickable links (open the paper) but stay sortable.
+        _fmt = {"DOI": lambda v: mo.md("[{}](https://doi.org/{})".format(v, v))}
+        _tab = lambda key: mo.ui.table(perf_rows(records, key), selection=None,
+                                       pagination=True, page_size=15, format_mapping=_fmt)
+        _tabs = mo.ui.tabs({"Citations": _tab("citations"),
+                            "FWCI": _tab("fwci"), "Altmetric": _tab("altmetric")})
+
+        _dl = mo.download(data=build_xlsx(records),
+                          filename="portfolio_analytics.xlsx",
                           label="Download full workbook (.xlsx)")
-        # Interactive, sortable/searchable tables — one per performance metric.
-        _tabs = mo.ui.tabs({
-            "Citations": mo.ui.table(perf_rows(records, "citations"),
-                                     selection=None, pagination=True, page_size=15),
-            "FWCI": mo.ui.table(perf_rows(records, "fwci"),
-                                selection=None, pagination=True, page_size=15),
-            "Altmetric": mo.ui.table(perf_rows(records, "altmetric"),
-                                     selection=None, pagination=True, page_size=15),
-        })
+
         _out = mo.vstack([
             _summary,
-            mo.md("### Topic wheel"), _wheel,
-            mo.md("### Performance — ranked by each metric (click a column to re-sort)"),
-            _tabs,
+            mo.md("### Citations × FWCI × Altmetric"),
+            mo.md("*Each bubble is a paper. Bubble size = Altmetric score.*"),
+            bubble, _clicked,
+            mo.md("### Top 10 countries"), _country,
+            mo.md("### Topic wheel"), subfield_dd, _wheel,
+            mo.md("### Performance — ranked by each metric (DOIs are clickable)"), _tabs,
             _dl,
         ])
     except Exception:
