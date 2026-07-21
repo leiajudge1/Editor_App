@@ -33,10 +33,18 @@ def _(mo):
         """
         # Editor portfolio analytics
 
-        Upload your **QTS report** (Excel) — the DOI column is read for you — and
-        get your portfolio's scientific spread, geographic spread, citation and
-        attention performance, and current standouts. Everything runs **in your
-        browser**: your file never leaves your machine.
+        Upload your **QTS report** (Excel) — the DOI column is read for you — and get
+        a full picture of the papers you've handled, computed **in your browser** so
+        your file never leaves your machine:
+
+        - **scientific spread** — an interactive topic wheel (filter by subfield), plus field/subfield/topic tables
+        - **performance** — citations, FWCI and Altmetric, with field-normalised percentiles, in sortable tables and a citations × FWCI × Altmetric bubble chart
+        - **PubPeer** — comments and retraction / expression-of-concern flags
+        - **collaboration reach**, **top-10 countries**, and **monthly trends**
+        - optional **who's citing you** — journals, institutions, countries and the top citing papers
+
+        Altmetric needs a configured proxy; PubPeer works from a normal (non-corporate)
+        connection; the "who's citing you" lookup is opt-in as it uses OpenAlex credits.
         """
     )
     return
