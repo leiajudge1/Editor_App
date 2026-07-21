@@ -51,7 +51,7 @@ def _():
     WHEEL_TOP_N = 32
     # Paste your deployed Cloudflare Worker URL here to add Altmetric scores.
     # Leave it empty ("") to run without Altmetric.
-    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev"
+    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev/"
     COUNTRY_NAMES = {
         "US": "United States", "GB": "United Kingdom", "CN": "China",
         "DE": "Germany", "FR": "France", "JP": "Japan", "CA": "Canada",
@@ -217,25 +217,33 @@ def _(IS_WASM, WORKER_URL):
         except Exception:
             return None
 
-    async def fetch_citing(oa_ids):
-        # Who cites the portfolio, via grouped queries (cheap: ~a few calls).
-        # Returns (top_journals, top_institutions) as [(name, count), ...].
+    async def fetch_citing(items, progress=None):
+        # items: list of (oa_id, cited_by_count). One reliable per-paper query per
+        # dimension (the OR-batched version undercounted). Returns
+        # (top_journals, top_institutions) as [(name, count), ...].
+        import asyncio
         from collections import Counter
-        short = [i.rsplit("/", 1)[-1] for i in oa_ids if i]
         jour, inst = Counter(), Counter()
         base = "https://api.openalex.org/works"
-        for start in range(0, len(short), 40):
-            cites = "|".join(short[start:start + 40])
-            for gb, ctr in (("primary_location.source.id", jour),
-                            ("authorships.institutions.id", inst)):
-                url = "{}?filter=cites:{}&group_by={}&per-page=1".format(base, cites, gb)
-                data = await _oa_json(url)
-                if data:
-                    for g in (data.get("group_by") or []):
-                        name = g.get("key_display_name")
-                        if name and name.lower() != "unknown":
-                            ctr[name] += g.get("count", 0)
-        return jour.most_common(15), inst.most_common(15)
+        for _wid_url, _cby in items:
+            wid = (_wid_url or "").rsplit("/", 1)[-1]
+            if wid.startswith("W") and _cby:
+                for gb, ctr in (("primary_location.source.id", jour),
+                                ("authorships.institutions.id", inst)):
+                    url = "{}?filter=cites:{}&group_by={}".format(base, wid, gb)
+                    data = None
+                    for _try in range(3):
+                        data = await _oa_json(url)
+                        if data is not None:
+                            break
+                    for g in ((data or {}).get("group_by") or []):
+                        nm = g.get("key_display_name")
+                        if nm and nm.lower() != "unknown":
+                            ctr[nm] += g.get("count", 0)
+            if progress:
+                progress()
+            await asyncio.sleep(0)
+        return jour.most_common(20), inst.most_common(20)
 
     return fetch_altmetric, fetch_citing, fetch_openalex
 
@@ -509,9 +517,11 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 async def _(fetch_citing, mo, records):
     citing = None
     if records:
-        with mo.status.spinner(title="Finding who cites your papers…"):
+        _items = [(r["oa_id"], r["citations"] or 0) for r in records]
+        with mo.status.progress_bar(total=len(_items),
+                                    title="Finding who cites your papers…") as _cbar:
             try:
-                citing = await fetch_citing([r["oa_id"] for r in records])
+                citing = await fetch_citing(_items, progress=lambda: _cbar.update())
             except Exception:
                 citing = None
     return (citing,)
