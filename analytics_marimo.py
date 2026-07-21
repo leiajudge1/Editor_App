@@ -277,7 +277,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i])
                    for i in range(len(selected))]
         ax.legend(handles, [_short(t) for t in selected], loc="center left",
-                  bbox_to_anchor=(1.02, 0.5), fontsize=10.5, frameon=False,
+                  bbox_to_anchor=(1.02, 0.5), fontsize=6.5, frameon=False,
                   title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
@@ -329,24 +329,25 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
             sizes.append(a if isinstance(a, (int, float)) else 0)
             texts.append((r["title"] or "")[:90])
             links.append("https://doi.org/" + r["doi"])
-        # Rank-based sizing spreads bubbles evenly regardless of how skewed the
-        # raw scores are, so differences are actually visible.
         n = len(sizes)
-        if n and max(sizes) != min(sizes):
-            order = sorted(range(n), key=lambda i: sizes[i])
-            rank = [0] * n
-            for pos, i in enumerate(order):
-                rank[i] = pos
-            msize = [7 + 40 * (rank[i] / (n - 1)) for i in range(n)]
-        else:
-            msize = [16] * n
+        # True area-proportional sizing (like Excel): bubble AREA scales with the
+        # Altmetric score, so outliers genuinely dominate. Plotly's sizemode="area"
+        # + sizeref does exactly this. sizeref is set so the biggest score maps to
+        # ~MAXPX pixels across; a size floor keeps zero/low papers just visible.
+        MAXPX = 60.0
+        FLOOR = 6.0
+        smax = max(sizes) if sizes else 0
+        sizeref = (2.0 * smax / (MAXPX ** 2)) if smax > 0 else 1.0
+        raw = [(s if isinstance(s, (int, float)) and s > 0 else 0.0) for s in sizes]
+        cdata = [[links[i], (sizes[i] if sizes[i] else "—")] for i in range(n)]
         fig = go.Figure(go.Scatter(
             x=xs, y=ys, mode="markers",
-            marker=dict(size=msize, color=ys, colorscale="Viridis", showscale=False,
-                        line=dict(width=0.5, color="white"), opacity=0.75),
-            customdata=links, text=texts,
+            marker=dict(size=raw, sizemode="area", sizeref=sizeref, sizemin=FLOOR,
+                        color=ys, colorscale="Viridis", showscale=False,
+                        line=dict(width=0.5, color="white"), opacity=0.7),
+            customdata=cdata, text=texts,
             hovertemplate=("<b>%{text}</b><br>Citations: %{x}<br>FWCI: %{y:.2f}"
-                           "<br>Altmetric size-ranked<extra></extra>")))
+                           "<br>Altmetric: %{customdata[1]}<extra></extra>")))
         fig.update_layout(xaxis_title="Citations", yaxis_title="FWCI",
                           height=520, template="simple_white", dragmode="select",
                           margin=dict(l=50, r=20, t=20, b=45))
@@ -441,18 +442,33 @@ def _(bubble, build_xlsx, country_fig, perf_rows, mo, records, subfield_dd,
                 _s["n"], _s["range"], len(_s["field"]), len(_s["subfield"]),
                 len(_s["topic"]), len(_s["country"]), _intl_pct))
 
-        # Clicked bubble -> surface the paper's link (opens in a new tab).
-        _clicked = mo.md("*Tip: hover a bubble for the paper; click one to get its link.*")
+        # Drag a box over bubbles -> persistent, clickable links below the chart.
+        # (A single click usually won't register as a selection; dragging does.)
+        _links_all = ["https://doi.org/" + r["doi"] for r in records]
+        _sel_urls = []
         try:
-            _pts = bubble.value or []
-            if _pts:
-                _url = _pts[0].get("customdata")
-                if isinstance(_url, (list, tuple)):
-                    _url = _url[0]
-                if _url:
-                    _clicked = mo.md("**Selected paper:** [{}]({})".format(_url, _url))
+            for _p in (bubble.value or []):
+                _u = _p.get("customdata")
+                if isinstance(_u, (list, tuple)):
+                    _u = _u[0] if _u else None
+                if not _u:
+                    _idx = _p.get("pointNumber")
+                    if _idx is None:
+                        _idx = _p.get("pointIndex")
+                    if _idx is None:
+                        _idx = _p.get("point_number", _p.get("point_index"))
+                    if isinstance(_idx, int) and 0 <= _idx < len(_links_all):
+                        _u = _links_all[_idx]
+                if _u and _u not in _sel_urls:
+                    _sel_urls.append(_u)
         except Exception:
             pass
+        if _sel_urls:
+            _clicked = mo.md("**Selected papers ({}):**\n\n".format(len(_sel_urls))
+                             + "\n".join("- [{}]({})".format(u, u) for u in _sel_urls))
+        else:
+            _clicked = mo.md("*Drag a box across bubbles to list them here as "
+                             "clickable links — the hover box shows each paper.*")
 
         _wheel = mo.image(wheel_png(records, subfield_dd.value), width=680)
         _country = mo.ui.plotly(country_fig(records))
@@ -471,7 +487,8 @@ def _(bubble, build_xlsx, country_fig, perf_rows, mo, records, subfield_dd,
         _out = mo.vstack([
             _summary,
             mo.md("### Citations × FWCI × Altmetric"),
-            mo.md("*Each bubble is a paper. Bubble size = Altmetric score.*"),
+            mo.md("*Each bubble is a paper. Size = Altmetric (by rank). Hover for "
+                  "details; **drag a box** over bubbles to list them with links below.*"),
             bubble, _clicked,
             mo.md("### Top 10 countries"), _country,
             mo.md("### Topic wheel"), subfield_dd, _wheel,
