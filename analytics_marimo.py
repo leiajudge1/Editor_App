@@ -230,15 +230,19 @@ def _(IS_WASM, WORKER_URL):
         from collections import Counter
         journals, institutions, countries = Counter(), Counter(), Counter()
         toppool = {}   # citing work id -> summary (deduped across your papers)
+        _dbg = {"queried": 0, "ok": 0, "works": 0, "sample": None}
         base = "https://api.openalex.org/works"
         sel = "id,title,publication_date,cited_by_count,doi,primary_location,authorships"
         for _wid_url, _cby, _ptitle in items:
             wid = (_wid_url or "").rsplit("/", 1)[-1]
             if wid.startswith("W") and _cby:
-                cursor, pages = "*", 0
-                while cursor and pages < 5:
-                    url = ("{}?filter=cites:{}&select={}&per-page=200&cursor={}"
-                           .format(base, wid, sel, cursor))
+                _dbg["queried"] += 1
+                page = 1
+                while page <= 5:
+                    url = ("{}?filter=cites:{}&select={}&per-page=200&page={}"
+                           .format(base, wid, sel, page))
+                    if _dbg["sample"] is None:
+                        _dbg["sample"] = url
                     data = None
                     for _try in range(3):
                         data = await _oa_json(url)
@@ -246,7 +250,12 @@ def _(IS_WASM, WORKER_URL):
                             break
                     if not data:
                         break
-                    for cw in (data.get("results") or []):
+                    results = data.get("results") or []
+                    _dbg["ok"] += 1
+                    _dbg["works"] += len(results)
+                    if not results:
+                        break
+                    for cw in results:
                         src = (cw.get("primary_location") or {}).get("source") or {}
                         jn = src.get("display_name")
                         if jn:
@@ -273,8 +282,9 @@ def _(IS_WASM, WORKER_URL):
                                      "url": (cw.get("doi") or cid), "yours": set()}
                                 toppool[cid] = e
                             e["yours"].add(_ptitle)
-                    cursor = (data.get("meta") or {}).get("next_cursor")
-                    pages += 1
+                    if len(results) < 200:
+                        break
+                    page += 1
             if progress:
                 progress()
             await asyncio.sleep(0)
@@ -289,6 +299,7 @@ def _(IS_WASM, WORKER_URL):
                             "url": d["url"], "yours": len(d["yours"])}
                            for d in sorted(toppool.values(),
                                            key=lambda x: x["citations"], reverse=True)[:100]],
+            "_dbg": _dbg,
         }
 
     return fetch_altmetric, fetch_citing, fetch_openalex
@@ -666,7 +677,7 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
         _trend = mo.ui.plotly(trend_fig(records))
 
         # Who's citing you — journals, institutions, countries, top papers
-        if citing:
+        if citing and (citing.get("journals") or citing.get("top_papers")):
             _jrows = [{"Journal": nm, "Citations": ct,
                        "Self (Nature)": "✓" if slf else ""}
                       for nm, ct, slf in citing["journals"]]
@@ -688,8 +699,12 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
                                                  page_size=25, format_mapping=_plink),
             })
         else:
-            _cite_view = mo.md("*Citation data couldn't be retrieved this time "
-                               "(OpenAlex may be busy) — try running again.*")
+            _d = (citing or {}).get("_dbg", {})
+            _cite_view = mo.md(
+                "*No citing data came back.*\n\n"
+                "Diagnostic — queried **{}** papers · **{}** calls returned data · "
+                "**{}** citing works seen.\n\nSample query:\n\n`{}`".format(
+                    _d.get("queried"), _d.get("ok"), _d.get("works"), _d.get("sample")))
 
         _out = mo.vstack([
             _summary, _bench,
