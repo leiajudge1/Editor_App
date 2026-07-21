@@ -127,12 +127,18 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
             for inst in a.get("institutions", []) or []:
                 if inst.get("country_code"):
                     codes.add(inst["country_code"].upper())
+        cnp = data.get("citation_normalized_percentile") or {}
+        pctl = cnp.get("value")
         return {
             "doi": doi,
+            "oa_id": data.get("id") or "",
             "title": data.get("title") or "",
             "date": data.get("publication_date") or "",
             "citations": data.get("cited_by_count"),
             "fwci": data.get("fwci"),
+            "percentile": pctl,  # 0-1; higher = cited more than that fraction of peers
+            "top1": bool(cnp.get("is_in_top_1_percent")),
+            "top10": bool(cnp.get("is_in_top_10_percent")),
             "domain": (pt.get("domain") or {}).get("display_name") or "Unclassified",
             "field": (pt.get("field") or {}).get("display_name") or "Unclassified",
             "subfield": (pt.get("subfield") or {}).get("display_name") or "Unclassified",
@@ -149,8 +155,8 @@ def _(IS_WASM, WORKER_URL):
     # ── Cross-environment OpenAlex fetch ──────────────────────────────────────
     # Browser: pyodide.http.pyfetch (async). Local: urllib (stdlib).
     async def fetch_openalex(doi, mailto=""):
-        select = ("title,publication_date,cited_by_count,fwci,primary_topic,"
-                  "authorships,type")
+        select = ("id,title,publication_date,cited_by_count,fwci,primary_topic,"
+                  "authorships,type,citation_normalized_percentile")
         url = "https://api.openalex.org/works/doi:{}?select={}".format(doi, select)
         if mailto:
             url += "&mailto=" + mailto
@@ -198,7 +204,40 @@ def _(IS_WASM, WORKER_URL):
                 data = json.loads(r.read().decode("utf-8"))
         return data.get("scores", {}) or {}
 
-    return fetch_altmetric, fetch_openalex
+    async def _oa_json(url):
+        if IS_WASM:
+            from pyodide.http import pyfetch
+            resp = await pyfetch(url)
+            return (await resp.json()) if resp.status == 200 else None
+        import urllib.request
+        import json
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    async def fetch_citing(oa_ids):
+        # Who cites the portfolio, via grouped queries (cheap: ~a few calls).
+        # Returns (top_journals, top_institutions) as [(name, count), ...].
+        from collections import Counter
+        short = [i.rsplit("/", 1)[-1] for i in oa_ids if i]
+        jour, inst = Counter(), Counter()
+        base = "https://api.openalex.org/works"
+        for start in range(0, len(short), 40):
+            cites = "|".join(short[start:start + 40])
+            for gb, ctr in (("primary_location.source.id", jour),
+                            ("authorships.institutions.id", inst)):
+                url = "{}?filter=cites:{}&group_by={}&per-page=1".format(base, cites, gb)
+                data = await _oa_json(url)
+                if data:
+                    for g in (data.get("group_by") or []):
+                        name = g.get("key_display_name")
+                        if name and name.lower() != "unknown":
+                            ctr[name] += g.get("count", 0)
+        return jour.most_common(15), inst.most_common(15)
+
+    return fetch_altmetric, fetch_citing, fetch_openalex
 
 
 @app.cell
@@ -228,6 +267,13 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
             "range": ("{} to {}".format(min(dated), max(dated)) if dated else "-"),
         }
 
+    def pctl_label(r):
+        v = r.get("percentile")
+        if not isinstance(v, (int, float)):
+            return ""
+        top = (1.0 - v) * 100.0
+        return "Top {:.0f}%".format(top) if top >= 1 else "Top 1%"
+
     def perf_rows(records, key):
         """All papers as rows, sorted by the given metric (desc).
         key is one of 'citations', 'fwci', 'altmetric'."""
@@ -236,7 +282,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
             return v if isinstance(v, (int, float)) else -1
         return [{"DOI": r["doi"], "Title": r["title"], "Published": r["date"],
                  "Citations": r["citations"], "FWCI": r["fwci"],
-                 "Altmetric": r.get("altmetric")}
+                 "Altmetric": r.get("altmetric"), "Field rank": pctl_label(r)}
                 for r in sorted(records, key=val, reverse=True)]
 
     def wheel_png(records, only_subfield=None):
@@ -277,7 +323,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i])
                    for i in range(len(selected))]
         ax.legend(handles, [_short(t) for t in selected], loc="center left",
-                  bbox_to_anchor=(1.02, 0.5), fontsize=12, frameon=False,
+                  bbox_to_anchor=(1.02, 0.5), fontsize=6.5, frameon=False,
                   title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
@@ -364,15 +410,57 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
                           xaxis_title="Papers", margin=dict(l=10, r=10, t=10, b=30))
         return fig
 
-    return bubble_fig, build_xlsx, country_fig, perf_rows, summarise, wheel_png
+    def collab_stats(records):
+        n = len(records)
+        solo = sum(1 for r in records if r["n_countries"] <= 1)
+        avg = (sum(r["n_countries"] for r in records) / n) if n else 0
+        partners = Counter(c for r in records if r["n_countries"] >= 2
+                           for c in r["countries"])
+        return {"solo": solo, "intl": n - solo, "avg": avg,
+                "partners": [(country_name(c), v) for c, v in partners.most_common(8)]}
+
+    def bench_summary(records):
+        withp = sum(1 for r in records if isinstance(r.get("percentile"), (int, float)))
+        return {"n_pct": withp,
+                "top1": sum(1 for r in records if r.get("top1")),
+                "top10": sum(1 for r in records if r.get("top10"))}
+
+    def trend_fig(records):
+        import statistics
+        by_year = {}
+        for r in records:
+            y = (r["date"] or "")[:4]
+            if y.isdigit():
+                by_year.setdefault(y, []).append(r)
+        years = sorted(by_year)
+        counts = [len(by_year[y]) for y in years]
+        med = []
+        for y in years:
+            fs = [r["fwci"] for r in by_year[y] if isinstance(r["fwci"], (int, float))]
+            med.append(round(statistics.median(fs), 2) if fs else None)
+        fig = go.Figure()
+        fig.add_bar(x=years, y=counts, name="Papers", marker_color="#B7A4CE")
+        fig.add_scatter(x=years, y=med, name="Median FWCI", mode="lines+markers",
+                        line=dict(color="#5B2C6F", width=3), yaxis="y2")
+        fig.update_layout(height=380, template="simple_white",
+                          yaxis=dict(title="Papers"),
+                          yaxis2=dict(title="Median FWCI", overlaying="y",
+                                      side="right", showgrid=False),
+                          legend=dict(orientation="h", y=1.12),
+                          margin=dict(l=40, r=45, t=30, b=30))
+        return fig
+
+    return (bench_summary, bubble_fig, build_xlsx, collab_stats, country_fig,
+            perf_rows, summarise, trend_fig, wheel_png)
 
 
 @app.cell
 def _(mo):
     file = mo.ui.file(filetypes=[".xlsx"], label="Upload your QTS report (.xlsx)")
     run = mo.ui.run_button(label="Build my analytics")
+    cite_run = mo.ui.run_button(label="Also find who's citing me (extra step)")
     mo.vstack([file, run])
-    return file, run
+    return cite_run, file, run
 
 
 @app.cell
@@ -418,6 +506,18 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 
 
 @app.cell
+async def _(cite_run, fetch_citing, mo, records):
+    citing = None
+    if records and cite_run.value:
+        with mo.status.spinner(title="Finding who cites your papers…"):
+            try:
+                citing = await fetch_citing([r["oa_id"] for r in records])
+            except Exception:
+                citing = None
+    return (citing,)
+
+
+@app.cell
 def _(bubble_fig, mo, records, summarise):
     # UI elements live in their own cell so their .value changes drive updates.
     mo.stop(not records, mo.md(""))
@@ -429,8 +529,9 @@ def _(bubble_fig, mo, records, summarise):
 
 
 @app.cell
-def _(bubble, build_xlsx, country_fig, perf_rows, mo, records, subfield_dd,
-      summarise, traceback, wheel_png):
+def _(bench_summary, bubble, build_xlsx, cite_run, citing, collab_stats,
+      country_fig, perf_rows, mo, records, subfield_dd, summarise, traceback,
+      trend_fig, wheel_png):
     mo.stop(not records, mo.md(""))
     try:
         _s = summarise(records)
@@ -484,15 +585,53 @@ def _(bubble, build_xlsx, country_fig, perf_rows, mo, records, subfield_dd,
                           filename="portfolio_analytics.xlsx",
                           label="Download full workbook (.xlsx)")
 
+        # Benchmarks (field/year-normalised percentiles)
+        _bs = bench_summary(records)
+        _bench = mo.md("**Field-normalised standing:** **{}** in the top 1% · "
+                       "**{}** in the top 10%  *(of {} papers with percentile data)*".format(
+                           _bs["top1"], _bs["top10"], _bs["n_pct"]))
+
+        # Collaboration reach
+        _cs = collab_stats(records)
+        _partners = ", ".join("{} ({})".format(nm, ct) for nm, ct in _cs["partners"]) or "—"
+        _collab = mo.md(
+            "### Collaboration reach\n\n"
+            "**{}** international · **{}** single-country · **{:.1f}** countries per "
+            "paper on average\n\n**Most frequent partner countries:** {}".format(
+                _cs["intl"], _cs["solo"], _cs["avg"], _partners))
+
+        # Time trend
+        _trend = mo.ui.plotly(trend_fig(records))
+
+        # Who's citing you (opt-in)
+        if citing:
+            _jour, _inst = citing
+            _cite_view = mo.ui.tabs({
+                "Journals": mo.ui.table([{"Journal": nm, "Citations to your papers": ct}
+                                         for nm, ct in _jour], selection=None,
+                                        pagination=True, page_size=10),
+                "Institutions": mo.ui.table([{"Institution": nm, "Citations to your papers": ct}
+                                             for nm, ct in _inst], selection=None,
+                                            pagination=True, page_size=10)})
+        else:
+            _cite_view = mo.vstack([
+                mo.md("*Optional: fetch the journals and institutions that cite your "
+                      "portfolio most (a few extra seconds).*"), cite_run])
+
         _out = mo.vstack([
-            _summary,
+            _summary, _bench,
             mo.md("### Citations × FWCI × Altmetric"),
-            mo.md("*Each bubble is a paper. Size = Altmetric (by rank). Hover for "
-                  "details; **drag a box** over bubbles to list them with links below.*"),
+            mo.md("*Each bubble is a paper. Bubble area = Altmetric score, so "
+                  "outliers stand out. Hover for details; **drag a box** over "
+                  "bubbles to list them with links below.*"),
             bubble, _clicked,
+            mo.md("### Over time"),
+            mo.md("*Bars = papers per year; line = median FWCI per year.*"), _trend,
             mo.md("### Top 10 countries"), _country,
+            _collab,
             mo.md("### Topic wheel"), subfield_dd, _wheel,
             mo.md("### Performance — ranked by each metric (DOIs are clickable)"), _tabs,
+            mo.md("### Who's citing your portfolio"), _cite_view,
             _dl,
         ])
     except Exception:
