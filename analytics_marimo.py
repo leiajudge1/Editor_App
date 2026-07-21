@@ -51,7 +51,7 @@ def _():
     WHEEL_TOP_N = 32
     # Paste your deployed Cloudflare Worker URL here to add Altmetric scores.
     # Leave it empty ("") to run without Altmetric.
-    WORKER_URL = ""
+    WORKER_URL = "https://altmetric-proxy.leiajudge.workers.dev"
     COUNTRY_NAMES = {
         "US": "United States", "GB": "United Kingdom", "CN": "China",
         "DE": "Germany", "FR": "France", "JP": "Japan", "CA": "Canada",
@@ -427,27 +427,28 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
 
     def trend_fig(records):
         import statistics
-        by_year = {}
+        by_month = {}
         for r in records:
-            y = (r["date"] or "")[:4]
-            if y.isdigit():
-                by_year.setdefault(y, []).append(r)
-        years = sorted(by_year)
-        counts = [len(by_year[y]) for y in years]
+            m = (r["date"] or "")[:7]  # YYYY-MM
+            if len(m) == 7 and m[:4].isdigit() and m[5:7].isdigit():
+                by_month.setdefault(m, []).append(r)
+        months = sorted(by_month)
+        counts = [len(by_month[m]) for m in months]
         med = []
-        for y in years:
-            fs = [r["fwci"] for r in by_year[y] if isinstance(r["fwci"], (int, float))]
+        for m in months:
+            fs = [r["fwci"] for r in by_month[m] if isinstance(r["fwci"], (int, float))]
             med.append(round(statistics.median(fs), 2) if fs else None)
         fig = go.Figure()
-        fig.add_bar(x=years, y=counts, name="Papers", marker_color="#B7A4CE")
-        fig.add_scatter(x=years, y=med, name="Median FWCI", mode="lines+markers",
+        fig.add_bar(x=months, y=counts, name="Papers", marker_color="#B7A4CE")
+        fig.add_scatter(x=months, y=med, name="Median FWCI", mode="lines+markers",
                         line=dict(color="#5B2C6F", width=3), yaxis="y2")
         fig.update_layout(height=380, template="simple_white",
+                          xaxis=dict(title="Month", type="category"),
                           yaxis=dict(title="Papers"),
                           yaxis2=dict(title="Median FWCI", overlaying="y",
                                       side="right", showgrid=False),
                           legend=dict(orientation="h", y=1.12),
-                          margin=dict(l=40, r=45, t=30, b=30))
+                          margin=dict(l=40, r=45, t=30, b=40))
         return fig
 
     return (bench_summary, bubble_fig, build_xlsx, collab_stats, country_fig,
@@ -458,9 +459,8 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
 def _(mo):
     file = mo.ui.file(filetypes=[".xlsx"], label="Upload your QTS report (.xlsx)")
     run = mo.ui.run_button(label="Build my analytics")
-    cite_run = mo.ui.run_button(label="Also find who's citing me (extra step)")
     mo.vstack([file, run])
-    return cite_run, file, run
+    return file, run
 
 
 @app.cell
@@ -506,9 +506,9 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 
 
 @app.cell
-async def _(cite_run, fetch_citing, mo, records):
+async def _(fetch_citing, mo, records):
     citing = None
-    if records and cite_run.value:
+    if records:
         with mo.status.spinner(title="Finding who cites your papers…"):
             try:
                 citing = await fetch_citing([r["oa_id"] for r in records])
@@ -529,7 +529,7 @@ def _(bubble_fig, mo, records, summarise):
 
 
 @app.cell
-def _(bench_summary, bubble, build_xlsx, cite_run, citing, collab_stats,
+def _(bench_summary, bubble, build_xlsx, citing, collab_stats,
       country_fig, perf_rows, mo, records, subfield_dd, summarise, traceback,
       trend_fig, wheel_png):
     mo.stop(not records, mo.md(""))
@@ -614,9 +614,8 @@ def _(bench_summary, bubble, build_xlsx, cite_run, citing, collab_stats,
                                              for nm, ct in _inst], selection=None,
                                             pagination=True, page_size=10)})
         else:
-            _cite_view = mo.vstack([
-                mo.md("*Optional: fetch the journals and institutions that cite your "
-                      "portfolio most (a few extra seconds).*"), cite_run])
+            _cite_view = mo.md("*Citation data couldn't be retrieved this time "
+                               "(OpenAlex may be busy) — try running again.*")
 
         _out = mo.vstack([
             _summary, _bench,
@@ -626,7 +625,7 @@ def _(bench_summary, bubble, build_xlsx, cite_run, citing, collab_stats,
                   "bubbles to list them with links below.*"),
             bubble, _clicked,
             mo.md("### Over time"),
-            mo.md("*Bars = papers per year; line = median FWCI per year.*"), _trend,
+            mo.md("*Bars = papers per month; line = median FWCI per month.*"), _trend,
             mo.md("### Top 10 countries"), _country,
             _collab,
             mo.md("### Topic wheel"), subfield_dd, _wheel,
