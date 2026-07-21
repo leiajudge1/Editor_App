@@ -158,12 +158,14 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
 def _(IS_WASM, WORKER_URL):
     # ── Cross-environment OpenAlex fetch ──────────────────────────────────────
     # Browser: pyodide.http.pyfetch (async). Local: urllib (stdlib).
-    async def fetch_openalex(doi, mailto=""):
+    # A contact email puts requests in OpenAlex's faster "polite pool".
+    MAILTO = "editor-analytics@users.noreply.github.com"
+
+    async def fetch_openalex(doi, mailto=MAILTO):
         select = ("id,title,publication_date,cited_by_count,fwci,primary_topic,"
                   "authorships,type,citation_normalized_percentile")
-        url = "https://api.openalex.org/works/doi:{}?select={}".format(doi, select)
-        if mailto:
-            url += "&mailto=" + mailto
+        url = "https://api.openalex.org/works/doi:{}?select={}&mailto={}".format(
+            doi, select, mailto)
         if IS_WASM:
             from pyodide.http import pyfetch
             resp = await pyfetch(url)
@@ -240,14 +242,15 @@ def _(IS_WASM, WORKER_URL):
                 page = 1
                 while page <= 5:
                     url = ("{}?filter=cites:{}&select={}&per-page=200&page={}"
-                           .format(base, wid, sel, page))
+                           "&mailto={}".format(base, wid, sel, page, MAILTO))
                     if _dbg["sample"] is None:
                         _dbg["sample"] = url
                     data = None
-                    for _try in range(3):
+                    for _try in range(4):
                         data = await _oa_json(url)
                         if data is not None:
                             break
+                        await asyncio.sleep(0.6 * (_try + 1))  # back off on throttle
                     if not data:
                         break
                     results = data.get("results") or []
@@ -287,7 +290,7 @@ def _(IS_WASM, WORKER_URL):
                     page += 1
             if progress:
                 progress()
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.05)
         return {
             "journals": [(n, c, ("nature" in n.lower()))
                          for n, c in journals.most_common(100)],
