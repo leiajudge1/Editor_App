@@ -304,7 +304,56 @@ def _(IS_WASM, WORKER_URL):
             "_dbg": _dbg,
         }
 
-    return fetch_altmetric, fetch_citing, fetch_openalex
+    async def fetch_pubpeer(dois):
+        # Direct browser call to PubPeer's public endpoint. Works from a normal
+        # (residential) connection; fails quietly on networks that block it.
+        # Returns {doi_lower: {"comments": n, "url": ..., "flag": ...}}.
+        import json
+        out = {}
+        endpoint = "https://pubpeer.com/v3/publications?devkey=PubMedChrome"
+        for start in range(0, len(dois), 40):
+            chunk = dois[start:start + 40]
+            payload = json.dumps({"version": "1.6.2", "browser": "Chrome",
+                                  "urls": [], "dois": chunk})
+            data = None
+            try:
+                if IS_WASM:
+                    from pyodide.http import pyfetch
+                    resp = await pyfetch(
+                        endpoint, method="POST",
+                        headers={"Content-Type": "application/json;charset=UTF-8"},
+                        body=payload)
+                    if resp.status == 200:
+                        data = await resp.json()
+                else:
+                    import urllib.request
+                    req = urllib.request.Request(
+                        endpoint, data=payload.encode("utf-8"),
+                        headers={"Content-Type": "application/json;charset=UTF-8"},
+                        method="POST")
+                    with urllib.request.urlopen(req, timeout=60) as r:
+                        data = json.loads(r.read().decode("utf-8"))
+            except Exception:
+                data = None
+            for fb in ((data or {}).get("feedbacks") or []):
+                doi = (fb.get("id") or "").lower()
+                if not doi:
+                    continue
+                flag = ""
+                for u in (fb.get("updates") or []):
+                    t = (u.get("type") or "").upper()
+                    if "RETRACT" in t:
+                        flag = "Retracted"
+                    elif "CONCERN" in t and not flag:
+                        flag = "Expression of concern"
+                out[doi] = {
+                    "comments": fb.get("total_comments") or 0,
+                    "url": fb.get("url") or ("https://pubpeer.com/publications/" + doi),
+                    "flag": flag,
+                }
+        return out
+
+    return fetch_altmetric, fetch_citing, fetch_openalex, fetch_pubpeer
 
 
 @app.cell
@@ -532,7 +581,7 @@ def _(mo):
 
 
 @app.cell
-async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file, mo, run, traceback, WORKER_URL):
+async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, fetch_pubpeer, extract, file, mo, run, traceback, WORKER_URL):
     # Gate the heavy work behind the button + an uploaded file.
     import asyncio
     mo.stop(not run.value, mo.md("*Upload your QTS report, then press **Build my analytics**.*"))
@@ -565,6 +614,18 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
                         _scores = {}
                 for r in records:
                     r["altmetric"] = _scores.get(r["doi"].lower())
+            # PubPeer comments (direct browser call; non-fatal if blocked)
+            if records:
+                with mo.status.spinner(title="Checking PubPeer…"):
+                    try:
+                        _pp = await fetch_pubpeer([r["doi"] for r in records])
+                    except Exception:
+                        _pp = {}
+                for r in records:
+                    _info = _pp.get(r["doi"].lower()) or {}
+                    r["pp_comments"] = _info.get("comments", 0)
+                    r["pp_url"] = _info.get("url", "")
+                    r["pp_flag"] = _info.get("flag", "")
     except Exception:
         _err = traceback.format_exc()
 
@@ -661,6 +722,23 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
                           filename="portfolio_analytics.xlsx",
                           label="Download full workbook (.xlsx)")
 
+        # PubPeer comments (papers with any comments/flags)
+        _pprows = sorted(
+            [{"DOI": r["doi"], "Title": r["title"],
+              "Comments": r.get("pp_comments", 0), "Flag": r.get("pp_flag", ""),
+              "Link": r.get("pp_url", "")}
+             for r in records if r.get("pp_comments")],
+            key=lambda x: x["Comments"], reverse=True)
+        if _pprows:
+            _pp_view = mo.ui.table(
+                _pprows, selection=None, pagination=True, page_size=25,
+                format_mapping={
+                    "DOI": lambda v: mo.md("[{}](https://doi.org/{})".format(v, v)),
+                    "Link": lambda v: mo.md("[PubPeer]({})".format(v)) if v else ""})
+        else:
+            _pp_view = mo.md("*No PubPeer comments found on these papers (or PubPeer "
+                             "wasn't reachable from this network).*")
+
         # Benchmarks (field/year-normalised percentiles)
         _bs = bench_summary(records)
         _bench = mo.md("**Field-normalised standing:** **{}** in the top 1% · "
@@ -692,6 +770,7 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
             _collab,
             mo.md("### Topic wheel"), subfield_dd, _wheel,
             mo.md("### Performance — ranked by each metric (DOIs are clickable)"), _tabs,
+            mo.md("### PubPeer comments"), _pp_view,
             _dl,
         ])
     except Exception:
