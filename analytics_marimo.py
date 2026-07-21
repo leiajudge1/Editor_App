@@ -35,8 +35,7 @@ def _(mo):
 
         Upload your **QTS report** (Excel) — the DOI column is read for you — and
         get your portfolio's scientific spread, geographic spread, citation and
-        attention performance, and current standouts. Everything runs **in your
-        browser**: your file never leaves your machine.
+        attention performance, and current standouts.
         """
     )
     return
