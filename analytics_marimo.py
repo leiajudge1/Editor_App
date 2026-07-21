@@ -229,7 +229,6 @@ def _(IS_WASM, WORKER_URL):
         import asyncio
         from collections import Counter
         journals, institutions, countries = Counter(), Counter(), Counter()
-        jpapers = {}   # journal -> set(your paper titles it cited)
         toppool = {}   # citing work id -> summary (deduped across your papers)
         base = "https://api.openalex.org/works"
         sel = "id,title,publication_date,cited_by_count,doi,primary_location,authorships"
@@ -252,7 +251,6 @@ def _(IS_WASM, WORKER_URL):
                         jn = src.get("display_name")
                         if jn:
                             journals[jn] += 1
-                            jpapers.setdefault(jn, set()).add(_ptitle)
                         seen_i, seen_c = set(), set()
                         for a in (cw.get("authorships") or []):
                             for ins in (a.get("institutions") or []):
@@ -265,28 +263,32 @@ def _(IS_WASM, WORKER_URL):
                                     seen_c.add(cc)
                                     countries[cc] += 1
                         cid = cw.get("id")
-                        if cid and cid not in toppool:
-                            toppool[cid] = {
-                                "title": (cw.get("title") or "")[:120],
-                                "journal": jn or "",
-                                "year": (cw.get("publication_date") or "")[:4],
-                                "citations": cw.get("cited_by_count") or 0,
-                                "url": (cw.get("doi") or cid),
-                            }
+                        if cid:
+                            e = toppool.get(cid)
+                            if e is None:
+                                e = {"title": (cw.get("title") or "")[:120],
+                                     "journal": jn or "",
+                                     "year": (cw.get("publication_date") or "")[:4],
+                                     "citations": cw.get("cited_by_count") or 0,
+                                     "url": (cw.get("doi") or cid), "yours": set()}
+                                toppool[cid] = e
+                            e["yours"].add(_ptitle)
                     cursor = (data.get("meta") or {}).get("next_cursor")
                     pages += 1
             if progress:
                 progress()
             await asyncio.sleep(0)
-        top_journals = journals.most_common(100)
         return {
-            "journals": [(n, c, ("nature" in n.lower())) for n, c in top_journals],
-            "journal_papers": {n: sorted(jpapers.get(n, set())) for n, _ in top_journals},
+            "journals": [(n, c, ("nature" in n.lower()))
+                         for n, c in journals.most_common(100)],
             "institutions": [(n, c, (n in self_insts))
                              for n, c in institutions.most_common(100)],
             "countries": countries.most_common(100),
-            "top_papers": sorted(toppool.values(), key=lambda d: d["citations"],
-                                 reverse=True)[:100],
+            "top_papers": [{"title": d["title"], "journal": d["journal"],
+                            "year": d["year"], "citations": d["citations"],
+                            "url": d["url"], "yours": len(d["yours"])}
+                           for d in sorted(toppool.values(),
+                                           key=lambda x: x["citations"], reverse=True)[:100]],
         }
 
     return fetch_altmetric, fetch_citing, fetch_openalex
@@ -375,7 +377,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i])
                    for i in range(len(selected))]
         ax.legend(handles, [_short(t) for t in selected], loc="center left",
-                  bbox_to_anchor=(1.02, 0.5), fontsize=12, frameon=False,
+                  bbox_to_anchor=(1.02, 0.5), fontsize=13, frameon=False,
                   title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
@@ -665,19 +667,8 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
 
         # Who's citing you — journals, institutions, countries, top papers
         if citing:
-            _jp = citing.get("journal_papers", {})
-
-            def _yours(nm):
-                ps = _jp.get(nm, [])
-                if not ps:
-                    return ""
-                head = "; ".join(p[:45] for p in ps[:3])
-                return "{} ({}{})".format(len(ps), head,
-                                          " …" if len(ps) > 3 else "")
-
             _jrows = [{"Journal": nm, "Citations": ct,
-                       "Self (Nature)": "✓" if slf else "",
-                       "Your papers cited": _yours(nm)}
+                       "Self (Nature)": "✓" if slf else ""}
                       for nm, ct, slf in citing["journals"]]
             _irows = [{"Institution": nm, "Citations": ct,
                        "Self-cite": "✓" if slf else ""}
@@ -687,13 +678,14 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
             _plink = {"Link": lambda v: mo.md("[open]({})".format(v))}
             _prows = [{"Title": p["title"], "Journal": p["journal"],
                        "Year": p["year"], "Citations": p["citations"],
+                       "Your papers cited": p.get("yours", 1),
                        "Link": p["url"]} for p in citing["top_papers"]]
             _cite_view = mo.ui.tabs({
-                "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=10),
-                "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=10),
-                "Countries": mo.ui.table(_crows, selection=None, pagination=True, page_size=10),
+                "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=25),
+                "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=25),
+                "Countries": mo.ui.table(_crows, selection=None, pagination=True, page_size=25),
                 "Top citing papers": mo.ui.table(_prows, selection=None, pagination=True,
-                                                 page_size=10, format_mapping=_plink),
+                                                 page_size=25, format_mapping=_plink),
             })
         else:
             _cite_view = mo.md("*Citation data couldn't be retrieved this time "
