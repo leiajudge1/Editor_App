@@ -278,15 +278,15 @@ def _(IS_WASM, WORKER_URL):
             if progress:
                 progress()
             await asyncio.sleep(0)
-        top_journals = journals.most_common(20)
+        top_journals = journals.most_common(100)
         return {
             "journals": [(n, c, ("nature" in n.lower())) for n, c in top_journals],
             "journal_papers": {n: sorted(jpapers.get(n, set())) for n, _ in top_journals},
             "institutions": [(n, c, (n in self_insts))
-                             for n, c in institutions.most_common(20)],
-            "countries": countries.most_common(20),
+                             for n, c in institutions.most_common(100)],
+            "countries": countries.most_common(100),
             "top_papers": sorted(toppool.values(), key=lambda d: d["citations"],
-                                 reverse=True)[:20],
+                                 reverse=True)[:100],
         }
 
     return fetch_altmetric, fetch_citing, fetch_openalex
@@ -375,7 +375,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i])
                    for i in range(len(selected))]
         ax.legend(handles, [_short(t) for t in selected], loc="center left",
-                  bbox_to_anchor=(1.02, 0.5), fontsize=6.5, frameon=False,
+                  bbox_to_anchor=(1.02, 0.5), fontsize=12, frameon=False,
                   title="Topic", ncol=2 if len(selected) > 16 else 1)
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
