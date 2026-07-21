@@ -526,8 +526,9 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
 def _(mo):
     file = mo.ui.file(filetypes=[".xlsx"], label="Upload your QTS report (.xlsx)")
     run = mo.ui.run_button(label="Build my analytics")
+    cite_run = mo.ui.run_button(label="Look up who's citing me")
     mo.vstack([file, run])
-    return file, run
+    return cite_run, file, run
 
 
 @app.cell
@@ -573,9 +574,9 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 
 
 @app.cell
-async def _(fetch_citing, mo, records):
+async def _(cite_run, fetch_citing, mo, records):
     citing = None
-    if records:
+    if records and cite_run.value:
         _items = [(r["oa_id"], r["citations"] or 0, r["title"] or r["doi"])
                   for r in records]
         _self_insts = set()
@@ -701,10 +702,15 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
 
 
 @app.cell
-def _(citing, country_name, mo, records):
-    # Separate cell so the slow citation lookup doesn't hold up the dashboard.
+def _(cite_run, citing, country_name, mo, records):
+    # Separate cell so the (optional) citation lookup doesn't hold up the dashboard.
     mo.stop(not records, mo.md(""))
-    if citing is None:
+    if not cite_run.value:
+        _view = mo.vstack([
+            mo.md("*Optional — this makes extra OpenAlex calls (which draw on your "
+                  "daily free credits), so it's off by default. Press to run it.*"),
+            cite_run])
+    elif citing is None:
         _view = mo.md("*Looking up who cites your papers…*")
     elif citing.get("journals") or citing.get("top_papers"):
         _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else ""}
