@@ -35,7 +35,8 @@ def _(mo):
 
         Upload your **QTS report** (Excel) — the DOI column is read for you — and
         get your portfolio's scientific spread, geographic spread, citation and
-        attention performance, and current standouts.
+        attention performance, and current standouts. Everything runs **in your
+        browser**: your file never leaves your machine.
         """
     )
     return
@@ -119,6 +120,7 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
     def extract(doi, data):
         pt = data.get("primary_topic") or {}
         codes = set()
+        inst_names = set()
         for a in data.get("authorships", []) or []:
             for c in a.get("countries", []) or []:
                 if c:
@@ -126,6 +128,8 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
             for inst in a.get("institutions", []) or []:
                 if inst.get("country_code"):
                     codes.add(inst["country_code"].upper())
+                if inst.get("display_name"):
+                    inst_names.add(inst["display_name"])
         cnp = data.get("citation_normalized_percentile") or {}
         pctl = cnp.get("value")
         return {
@@ -144,6 +148,7 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
             "topic": pt.get("display_name") or "Unclassified",
             "countries": sorted(codes),
             "n_countries": len(codes),
+            "inst_names": sorted(inst_names),
         }
 
     return clean_doi, country_name, dois_from_xlsx_bytes, extract, re
@@ -216,33 +221,73 @@ def _(IS_WASM, WORKER_URL):
         except Exception:
             return None
 
-    async def fetch_citing(items, progress=None):
-        # items: list of (oa_id, cited_by_count). One reliable per-paper query per
-        # dimension (the OR-batched version undercounted). Returns
-        # (top_journals, top_institutions) as [(name, count), ...].
+    async def fetch_citing(items, self_insts, progress=None):
+        # items: list of (oa_id, cited_by_count, your_paper_title).
+        # Fetches the actual citing works per paper and aggregates journals,
+        # institutions, countries, top individual citing papers, and which of
+        # your papers each journal cited. Returns a dict.
         import asyncio
         from collections import Counter
-        jour, inst = Counter(), Counter()
+        journals, institutions, countries = Counter(), Counter(), Counter()
+        jpapers = {}   # journal -> set(your paper titles it cited)
+        toppool = {}   # citing work id -> summary (deduped across your papers)
         base = "https://api.openalex.org/works"
-        for _wid_url, _cby in items:
+        sel = "id,title,publication_date,cited_by_count,doi,primary_location,authorships"
+        for _wid_url, _cby, _ptitle in items:
             wid = (_wid_url or "").rsplit("/", 1)[-1]
             if wid.startswith("W") and _cby:
-                for gb, ctr in (("primary_location.source.id", jour),
-                                ("authorships.institutions.id", inst)):
-                    url = "{}?filter=cites:{}&group_by={}".format(base, wid, gb)
+                cursor, pages = "*", 0
+                while cursor and pages < 5:
+                    url = ("{}?filter=cites:{}&select={}&per-page=200&cursor={}"
+                           .format(base, wid, sel, cursor))
                     data = None
                     for _try in range(3):
                         data = await _oa_json(url)
                         if data is not None:
                             break
-                    for g in ((data or {}).get("group_by") or []):
-                        nm = g.get("key_display_name")
-                        if nm and nm.lower() != "unknown":
-                            ctr[nm] += g.get("count", 0)
+                    if not data:
+                        break
+                    for cw in (data.get("results") or []):
+                        src = (cw.get("primary_location") or {}).get("source") or {}
+                        jn = src.get("display_name")
+                        if jn:
+                            journals[jn] += 1
+                            jpapers.setdefault(jn, set()).add(_ptitle)
+                        seen_i, seen_c = set(), set()
+                        for a in (cw.get("authorships") or []):
+                            for ins in (a.get("institutions") or []):
+                                inm = ins.get("display_name")
+                                if inm and inm not in seen_i:
+                                    seen_i.add(inm)
+                                    institutions[inm] += 1
+                            for cc in (a.get("countries") or []):
+                                if cc and cc not in seen_c:
+                                    seen_c.add(cc)
+                                    countries[cc] += 1
+                        cid = cw.get("id")
+                        if cid and cid not in toppool:
+                            toppool[cid] = {
+                                "title": (cw.get("title") or "")[:120],
+                                "journal": jn or "",
+                                "year": (cw.get("publication_date") or "")[:4],
+                                "citations": cw.get("cited_by_count") or 0,
+                                "url": (cw.get("doi") or cid),
+                            }
+                    cursor = (data.get("meta") or {}).get("next_cursor")
+                    pages += 1
             if progress:
                 progress()
             await asyncio.sleep(0)
-        return jour.most_common(20), inst.most_common(20)
+        top_journals = journals.most_common(20)
+        return {
+            "journals": [(n, c, ("nature" in n.lower())) for n, c in top_journals],
+            "journal_papers": {n: sorted(jpapers.get(n, set())) for n, _ in top_journals},
+            "institutions": [(n, c, (n in self_insts))
+                             for n, c in institutions.most_common(20)],
+            "countries": countries.most_common(20),
+            "top_papers": sorted(toppool.values(), key=lambda d: d["citations"],
+                                 reverse=True)[:20],
+        }
 
     return fetch_altmetric, fetch_citing, fetch_openalex
 
@@ -516,11 +561,17 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file
 async def _(fetch_citing, mo, records):
     citing = None
     if records:
-        _items = [(r["oa_id"], r["citations"] or 0) for r in records]
+        _items = [(r["oa_id"], r["citations"] or 0, r["title"] or r["doi"])
+                  for r in records]
+        _self_insts = set()
+        for _r in records:
+            for _nm in _r.get("inst_names", []):
+                _self_insts.add(_nm)
         with mo.status.progress_bar(total=len(_items),
                                     title="Finding who cites your papers…") as _cbar:
             try:
-                citing = await fetch_citing(_items, progress=lambda: _cbar.update())
+                citing = await fetch_citing(_items, _self_insts,
+                                            progress=lambda: _cbar.update())
             except Exception:
                 citing = None
     return (citing,)
@@ -538,8 +589,8 @@ def _(bubble_fig, mo, records, summarise):
 
 
 @app.cell
-def _(bench_summary, bubble, build_xlsx, citing, collab_stats,
-      country_fig, perf_rows, mo, records, subfield_dd, summarise, traceback,
+def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
+      country_name, perf_rows, mo, records, subfield_dd, summarise, traceback,
       trend_fig, wheel_png):
     mo.stop(not records, mo.md(""))
     try:
@@ -612,16 +663,38 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats,
         # Time trend
         _trend = mo.ui.plotly(trend_fig(records))
 
-        # Who's citing you (opt-in)
+        # Who's citing you — journals, institutions, countries, top papers
         if citing:
-            _jour, _inst = citing
+            _jp = citing.get("journal_papers", {})
+
+            def _yours(nm):
+                ps = _jp.get(nm, [])
+                if not ps:
+                    return ""
+                head = "; ".join(p[:45] for p in ps[:3])
+                return "{} ({}{})".format(len(ps), head,
+                                          " …" if len(ps) > 3 else "")
+
+            _jrows = [{"Journal": nm, "Citations": ct,
+                       "Self (Nature)": "✓" if slf else "",
+                       "Your papers cited": _yours(nm)}
+                      for nm, ct, slf in citing["journals"]]
+            _irows = [{"Institution": nm, "Citations": ct,
+                       "Self-cite": "✓" if slf else ""}
+                      for nm, ct, slf in citing["institutions"]]
+            _crows = [{"Country": country_name(cc), "Citations": ct}
+                      for cc, ct in citing["countries"]]
+            _plink = {"Link": lambda v: mo.md("[open]({})".format(v))}
+            _prows = [{"Title": p["title"], "Journal": p["journal"],
+                       "Year": p["year"], "Citations": p["citations"],
+                       "Link": p["url"]} for p in citing["top_papers"]]
             _cite_view = mo.ui.tabs({
-                "Journals": mo.ui.table([{"Journal": nm, "Citations to your papers": ct}
-                                         for nm, ct in _jour], selection=None,
-                                        pagination=True, page_size=10),
-                "Institutions": mo.ui.table([{"Institution": nm, "Citations to your papers": ct}
-                                             for nm, ct in _inst], selection=None,
-                                            pagination=True, page_size=10)})
+                "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=10),
+                "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=10),
+                "Countries": mo.ui.table(_crows, selection=None, pagination=True, page_size=10),
+                "Top citing papers": mo.ui.table(_prows, selection=None, pagination=True,
+                                                 page_size=10, format_mapping=_plink),
+            })
         else:
             _cite_view = mo.md("*Citation data couldn't be retrieved this time "
                                "(OpenAlex may be busy) — try running again.*")
