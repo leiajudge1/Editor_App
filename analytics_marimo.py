@@ -246,11 +246,10 @@ def _(IS_WASM, WORKER_URL):
                     if _dbg["sample"] is None:
                         _dbg["sample"] = url
                     data = None
-                    for _try in range(4):
+                    for _try in range(3):
                         data = await _oa_json(url)
                         if data is not None:
                             break
-                        await asyncio.sleep(0.6 * (_try + 1))  # back off on throttle
                     if not data:
                         break
                     results = data.get("results") or []
@@ -290,7 +289,7 @@ def _(IS_WASM, WORKER_URL):
                     page += 1
             if progress:
                 progress()
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0)
         return {
             "journals": [(n, c, ("nature" in n.lower()))
                          for n, c in journals.most_common(100)],
@@ -605,8 +604,8 @@ def _(bubble_fig, mo, records, summarise):
 
 
 @app.cell
-def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
-      country_name, perf_rows, mo, records, subfield_dd, summarise, traceback,
+def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
+      perf_rows, mo, records, subfield_dd, summarise, traceback,
       trend_fig, wheel_png):
     mo.stop(not records, mo.md(""))
     try:
@@ -679,36 +678,6 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
         # Time trend
         _trend = mo.ui.plotly(trend_fig(records))
 
-        # Who's citing you — journals, institutions, countries, top papers
-        if citing and (citing.get("journals") or citing.get("top_papers")):
-            _jrows = [{"Journal": nm, "Citations": ct,
-                       "Self (Nature)": "✓" if slf else ""}
-                      for nm, ct, slf in citing["journals"]]
-            _irows = [{"Institution": nm, "Citations": ct,
-                       "Self-cite": "✓" if slf else ""}
-                      for nm, ct, slf in citing["institutions"]]
-            _crows = [{"Country": country_name(cc), "Citations": ct}
-                      for cc, ct in citing["countries"]]
-            _plink = {"Link": lambda v: mo.md("[open]({})".format(v))}
-            _prows = [{"Title": p["title"], "Journal": p["journal"],
-                       "Year": p["year"], "Citations": p["citations"],
-                       "Your papers cited": p.get("yours", 1),
-                       "Link": p["url"]} for p in citing["top_papers"]]
-            _cite_view = mo.ui.tabs({
-                "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=25),
-                "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=25),
-                "Countries": mo.ui.table(_crows, selection=None, pagination=True, page_size=25),
-                "Top citing papers": mo.ui.table(_prows, selection=None, pagination=True,
-                                                 page_size=25, format_mapping=_plink),
-            })
-        else:
-            _d = (citing or {}).get("_dbg", {})
-            _cite_view = mo.md(
-                "*No citing data came back.*\n\n"
-                "Diagnostic — queried **{}** papers · **{}** calls returned data · "
-                "**{}** citing works seen.\n\nSample query:\n\n`{}`".format(
-                    _d.get("queried"), _d.get("ok"), _d.get("works"), _d.get("sample")))
-
         _out = mo.vstack([
             _summary, _bench,
             mo.md("### Citations × FWCI × Altmetric"),
@@ -722,13 +691,47 @@ def _(bench_summary, bubble, build_xlsx, citing, collab_stats, country_fig,
             _collab,
             mo.md("### Topic wheel"), subfield_dd, _wheel,
             mo.md("### Performance — ranked by each metric (DOIs are clickable)"), _tabs,
-            mo.md("### Who's citing your portfolio"), _cite_view,
             _dl,
         ])
     except Exception:
         _out = mo.md("### ⚠️ Error while building the report\n\n```\n{}\n```".format(
             traceback.format_exc()))
     _out
+    return
+
+
+@app.cell
+def _(citing, country_name, mo, records):
+    # Separate cell so the slow citation lookup doesn't hold up the dashboard.
+    mo.stop(not records, mo.md(""))
+    if citing is None:
+        _view = mo.md("*Looking up who cites your papers…*")
+    elif citing.get("journals") or citing.get("top_papers"):
+        _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else ""}
+                  for nm, ct, slf in citing["journals"]]
+        _irows = [{"Institution": nm, "Citations": ct, "Self-cite": "✓" if slf else ""}
+                  for nm, ct, slf in citing["institutions"]]
+        _crows = [{"Country": country_name(cc), "Citations": ct}
+                  for cc, ct in citing["countries"]]
+        _plink = {"Link": lambda v: mo.md("[open]({})".format(v))}
+        _prows = [{"Title": p["title"], "Journal": p["journal"], "Year": p["year"],
+                   "Citations": p["citations"], "Your papers cited": p.get("yours", 1),
+                   "Link": p["url"]} for p in citing["top_papers"]]
+        _view = mo.ui.tabs({
+            "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=25),
+            "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=25),
+            "Countries": mo.ui.table(_crows, selection=None, pagination=True, page_size=25),
+            "Top citing papers": mo.ui.table(_prows, selection=None, pagination=True,
+                                             page_size=25, format_mapping=_plink),
+        })
+    else:
+        _d = citing.get("_dbg", {})
+        _view = mo.md(
+            "*No citing data came back.*\n\nDiagnostic — queried **{}** papers · "
+            "**{}** calls returned data · **{}** citing works seen.\n\n`{}`".format(
+                _d.get("queried"), _d.get("ok"), _d.get("works"), _d.get("sample")))
+
+    mo.vstack([mo.md("### Who's citing your portfolio"), _view])
     return
 
 
