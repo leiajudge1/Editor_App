@@ -232,83 +232,76 @@ def _(IS_WASM, WORKER_URL):
             return None
 
     async def fetch_citing(items, self_insts, progress=None):
-        # items: list of (oa_id, cited_by_count, your_paper_title).
-        # Fetches the actual citing works per paper and aggregates journals,
-        # institutions, countries, top individual citing papers, and which of
-        # your papers each journal cited. Returns a dict.
+        # items: list of (oa_id, cited_by_count).
+        # FAST PATH: batch papers into OR'd group_by queries — 3 calls per batch
+        # of BATCH papers instead of ~1 per paper (a ~25x cut in requests).
+        # SAFETY NET: we already know how many citations to expect (the sum of
+        # cited_by_count), so if the batched result captures far fewer than that,
+        # we assume the batched filter misbehaved and automatically redo it one
+        # paper at a time. Fast when batching works, correct when it doesn't.
         import asyncio
         from collections import Counter
-        journals, institutions, countries = Counter(), Counter(), Counter()
-        toppool = {}   # citing work id -> summary (deduped across your papers)
-        _dbg = {"queried": 0, "ok": 0, "works": 0, "sample": None}
+        BATCH = 25          # stay well inside OpenAlex's OR-list limits
+        MIN_COVERAGE = 0.5  # below this share of expected citations, fall back
         base = "https://api.openalex.org/works"
-        sel = "id,title,publication_date,cited_by_count,doi,primary_location,authorships"
-        for _wid_url, _cby, _ptitle in items:
-            wid = (_wid_url or "").rsplit("/", 1)[-1]
-            if wid.startswith("W") and _cby:
-                _dbg["queried"] += 1
-                page = 1
-                while page <= 5:
-                    url = ("{}?filter=cites:{}&select={}&per-page=200&page={}"
-                           "&mailto={}".format(base, wid, sel, page, MAILTO))
-                    if _dbg["sample"] is None:
-                        _dbg["sample"] = url
-                    data = None
-                    for _try in range(3):
-                        data = await _oa_json(url)
-                        if data is not None:
-                            break
-                    if not data:
-                        break
-                    results = data.get("results") or []
-                    _dbg["ok"] += 1
-                    _dbg["works"] += len(results)
-                    if not results:
-                        break
-                    for cw in results:
-                        src = (cw.get("primary_location") or {}).get("source") or {}
-                        jn = src.get("display_name")
-                        if jn:
-                            journals[jn] += 1
-                        seen_i, seen_c = set(), set()
-                        for a in (cw.get("authorships") or []):
-                            for ins in (a.get("institutions") or []):
-                                inm = ins.get("display_name")
-                                if inm and inm not in seen_i:
-                                    seen_i.add(inm)
-                                    institutions[inm] += 1
-                            for cc in (a.get("countries") or []):
-                                if cc and cc not in seen_c:
-                                    seen_c.add(cc)
-                                    countries[cc] += 1
-                        cid = cw.get("id")
-                        if cid:
-                            e = toppool.get(cid)
-                            if e is None:
-                                e = {"title": (cw.get("title") or "")[:120],
-                                     "journal": jn or "",
-                                     "year": (cw.get("publication_date") or "")[:4],
-                                     "citations": cw.get("cited_by_count") or 0,
-                                     "url": (cw.get("doi") or cid), "yours": set()}
-                                toppool[cid] = e
-                            e["yours"].add(_ptitle)
-                    if len(results) < 200:
-                        break
-                    page += 1
-            if progress:
-                progress()
-            await asyncio.sleep(0)
+        GROUPS = (("primary_location.source.id", "journals"),
+                  ("authorships.institutions.id", "institutions"),
+                  ("authorships.countries", "countries"))
+        cited = [((w or "").rsplit("/", 1)[-1], c) for w, c in items]
+        cited = [(w, c) for w, c in cited if w.startswith("W") and c]
+        expected = sum(c for _, c in cited)
+        _dbg = {"mode": "batched", "papers": len(cited), "calls": 0, "ok": 0,
+                "expected": expected, "captured": 0, "sample": None}
+
+        async def _grouped(filter_val, gb):
+            url = ("{}?filter=cites:{}&group_by={}&per-page=200&mailto={}"
+                   .format(base, filter_val, gb, MAILTO))
+            if _dbg["sample"] is None:
+                _dbg["sample"] = url
+            data = None
+            for _try in range(3):
+                data = await _oa_json(url)
+                if data is not None:
+                    break
+            _dbg["calls"] += 1
+            if data:
+                _dbg["ok"] += 1
+            return ((data or {}).get("group_by") or [])
+
+        async def _run(batch_size, report):
+            counters = {"journals": Counter(), "institutions": Counter(),
+                        "countries": Counter()}
+            for start in range(0, len(cited), batch_size):
+                chunk = cited[start:start + batch_size]
+                filt = "|".join(w for w, _ in chunk)
+                for gb, name in GROUPS:
+                    for g in await _grouped(filt, gb):
+                        key = g.get("key_display_name") or g.get("key")
+                        if key and str(key).lower() not in ("unknown", "none"):
+                            counters[name][key] += g.get("count", 0)
+                if report and progress:
+                    for _ in chunk:
+                        progress()
+                await asyncio.sleep(0)
+            return counters
+
+        counters = await _run(BATCH, report=True)
+        captured = sum(counters["journals"].values())
+        _dbg["captured"] = captured
+
+        # Safety net: batched result clearly incomplete -> redo per paper.
+        if expected and captured < MIN_COVERAGE * expected:
+            _dbg["mode"] = "per-paper fallback"
+            _dbg["batched_captured"] = captured
+            counters = await _run(1, report=False)
+            _dbg["captured"] = sum(counters["journals"].values())
+
         return {
-            "journals": [(n, c, ("nature" in n.lower()))
-                         for n, c in journals.most_common(100)],
+            "journals": [(n, c, ("nature" in str(n).lower()))
+                         for n, c in counters["journals"].most_common(100)],
             "institutions": [(n, c, (n in self_insts))
-                             for n, c in institutions.most_common(100)],
-            "countries": countries.most_common(100),
-            "top_papers": [{"title": d["title"], "journal": d["journal"],
-                            "year": d["year"], "citations": d["citations"],
-                            "url": d["url"], "yours": len(d["yours"])}
-                           for d in sorted(toppool.values(),
-                                           key=lambda x: x["citations"], reverse=True)[:100]],
+                             for n, c in counters["institutions"].most_common(100)],
+            "countries": counters["countries"].most_common(100),
             "_dbg": _dbg,
         }
 
@@ -646,8 +639,7 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, fetch_pubpeer
 async def _(cite_run, fetch_citing, mo, records):
     citing = None
     if records and cite_run.value:
-        _items = [(r["oa_id"], r["citations"] or 0, r["title"] or r["doi"])
-                  for r in records]
+        _items = [(r["oa_id"], r["citations"] or 0) for r in records]
         _self_insts = set()
         for _r in records:
             for _nm in _r.get("inst_names", []):
@@ -767,6 +759,7 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
 
         _out = mo.vstack([
             _summary, _bench,
+            mo.md("### PubPeer comments"), _pp_view,
             mo.md("### Citations × FWCI × Altmetric"),
             mo.md("*Each bubble is a paper. Bubble area = Altmetric score, so "
                   "outliers stand out. Hover for details; **drag a box** over "
@@ -778,7 +771,6 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
             _collab,
             mo.md("### Topic wheel"), subfield_dd, _wheel,
             mo.md("### Performance — ranked by each metric (DOIs are clickable)"), _tabs,
-            mo.md("### PubPeer comments"), _pp_view,
             _dl,
         ])
     except Exception:
@@ -799,30 +791,32 @@ def _(cite_run, citing, country_name, mo, records):
             cite_run])
     elif citing is None:
         _view = mo.md("*Looking up who cites your papers…*")
-    elif citing.get("journals") or citing.get("top_papers"):
+    elif citing.get("journals") or citing.get("institutions"):
         _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else ""}
                   for nm, ct, slf in citing["journals"]]
         _irows = [{"Institution": nm, "Citations": ct, "Self-cite": "✓" if slf else ""}
                   for nm, ct, slf in citing["institutions"]]
         _crows = [{"Country": country_name(cc), "Citations": ct}
                   for cc, ct in citing["countries"]]
-        _plink = {"Link": lambda v: mo.md("[open]({})".format(v))}
-        _prows = [{"Title": p["title"], "Journal": p["journal"], "Year": p["year"],
-                   "Citations": p["citations"], "Your papers cited": p.get("yours", 1),
-                   "Link": p["url"]} for p in citing["top_papers"]]
-        _view = mo.ui.tabs({
+        _d = citing.get("_dbg", {})
+        _note = mo.md(
+            "*Captured **{}** citing records across **{}** papers "
+            "(expected ~{} citations) · {} · {} API calls.*".format(
+                _d.get("captured"), _d.get("papers"), _d.get("expected"),
+                _d.get("mode"), _d.get("calls")))
+        _view = mo.vstack([_note, mo.ui.tabs({
             "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=25),
             "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=25),
             "Countries": mo.ui.table(_crows, selection=None, pagination=True, page_size=25),
-            "Top citing papers": mo.ui.table(_prows, selection=None, pagination=True,
-                                             page_size=25, format_mapping=_plink),
-        })
+        })])
     else:
         _d = citing.get("_dbg", {})
         _view = mo.md(
-            "*No citing data came back.*\n\nDiagnostic — queried **{}** papers · "
-            "**{}** calls returned data · **{}** citing works seen.\n\n`{}`".format(
-                _d.get("queried"), _d.get("ok"), _d.get("works"), _d.get("sample")))
+            "*No citing data came back.*\n\nDiagnostic — **{}** papers · "
+            "**{}** calls (**{}** returned data) · captured **{}** of ~{} "
+            "expected · mode: {}.\n\n`{}`".format(
+                _d.get("papers"), _d.get("calls"), _d.get("ok"), _d.get("captured"),
+                _d.get("expected"), _d.get("mode"), _d.get("sample")))
 
     mo.vstack([mo.md("### Who's citing your portfolio"), _view])
     return
