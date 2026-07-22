@@ -80,7 +80,6 @@ def _():
 @app.cell
 def _(COUNTRY_NAMES, io, openpyxl_ready):
     import re
-    import csv
     from openpyxl import load_workbook
 
     def clean_doi(raw):
@@ -160,79 +159,7 @@ def _(COUNTRY_NAMES, io, openpyxl_ready):
             "inst_names": sorted(inst_names),
         }
 
-    def norm_journal(s):
-        """Normalise a journal name so JCR and OpenAlex spellings match."""
-        t = str(s or "").upper().strip()
-        t = t.replace("&", " AND ")
-        t = re.sub(r"[^A-Z0-9 ]+", " ", t)
-        t = re.sub(r"\s+", " ", t).strip()
-        if t.startswith("THE "):
-            t = t[4:]
-        return t
-
-    def jifs_from_bytes(filename, data):
-        """Read a JCR export (.csv/.txt/.tsv or .xlsx) and return
-        ({normalised journal name: JIF}, {issn: JIF}).
-
-        Handles the real JCR export layout: a filter description line, a blank
-        line, then the header; quoted fields containing commas; thousands
-        separators; a trailing empty column; and a copyright footer. Journals
-        appear once per category, so duplicates collapse."""
-        rows = []
-        if str(filename).lower().endswith(".xlsx"):
-            wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-            for ws in wb.worksheets:
-                for r in ws.iter_rows(values_only=True):
-                    rows.append(["" if c is None else str(c) for c in r])
-                break
-        else:
-            text = data.decode("utf-8-sig", "replace")
-            sample = "\n".join(text.splitlines()[:40])
-            delim = "\t" if sample.count("\t") > sample.count(",") else ","
-            rows = list(csv.reader(io.StringIO(text), delimiter=delim))
-
-        # The header is not necessarily row 0 - find the row that has a JIF column.
-        head_i, jif_i, name_i = None, None, None
-        for i, r in enumerate(rows[:40]):
-            cells = [str(c or "").strip() for c in r]
-            up = [c.upper() for c in cells]
-            j = next((k for k, h in enumerate(up) if re.match(r"^\d{4}\s+JIF$", h)), None)
-            if j is None:
-                j = next((k for k, h in enumerate(up)
-                          if "JIF" in h and "5" not in h and "WITHOUT" not in h
-                          and "QUARTILE" not in h), None)
-            if j is not None:
-                head_i, jif_i = i, j
-                name_i = next((k for k, h in enumerate(up)
-                               if h in ("JOURNAL NAME", "JOURNAL", "FULL JOURNAL TITLE")), 0)
-                issn_ks = [k for k, h in enumerate(up) if "ISSN" in h]
-                break
-        if head_i is None:
-            return {}, {}
-
-        by_name, by_issn = {}, {}
-        for r in rows[head_i + 1:]:
-            if len(r) <= max(name_i, jif_i):
-                continue          # short rows: blank lines, copyright footer
-            raw = str(r[jif_i]).strip().replace(",", "").replace("%", "")
-            if not raw or raw.upper() in ("N/A", "NA"):
-                continue
-            try:
-                val = round(float(raw), 1)
-            except ValueError:
-                continue
-            key = norm_journal(r[name_i])
-            if key:
-                by_name.setdefault(key, val)
-            for k in issn_ks:
-                if k < len(r):
-                    s = str(r[k]).strip().upper()
-                    if s and s not in ("N/A", "NA"):
-                        by_issn.setdefault(s, val)
-        return by_name, by_issn
-
-    return (clean_doi, country_name, dois_from_xlsx_bytes, extract,
-            jifs_from_bytes, norm_journal, re)
+    return clean_doi, country_name, dois_from_xlsx_bytes, extract, re
 
 
 @app.cell
@@ -374,35 +301,9 @@ def _(IS_WASM, WORKER_URL):
 
         top_journals = counters["journals"].most_common(100)
 
-        # Journal-level impact: OpenAlex "2-year mean citedness" — computed the
-        # same way as an impact factor (the JIF itself is proprietary Clarivate
-        # data and has no open API). ~2 extra calls for 100 journals.
-        impact = {}
-        issns = {}
-        wanted = [jids[n] for n, _ in top_journals if jids.get(n)]
-        for start in range(0, len(wanted), 50):
-            ids = "|".join(wanted[start:start + 50])
-            url = ("https://api.openalex.org/sources?filter=ids.openalex:{}"
-                   "&select=id,issn,summary_stats&per-page=50&mailto={}".format(ids, MAILTO))
-            data = None
-            for _try in range(3):
-                data = await _oa_json(url)
-                if data is not None:
-                    break
-            _dbg["calls"] += 1
-            for s in ((data or {}).get("results") or []):
-                sid = str(s.get("id") or "").rsplit("/", 1)[-1]
-                val = (s.get("summary_stats") or {}).get("2yr_mean_citedness")
-                if sid and isinstance(val, (int, float)):
-                    impact[sid] = round(val, 1)
-                if sid:
-                    issns[sid] = [str(x).upper() for x in (s.get("issn") or [])]
-
         return {
-            "journals": [(n, c, ("nature" in str(n).lower()),
-                          impact.get(jids.get(n, ""), ""))
+            "journals": [(n, c, ("nature" in str(n).lower()))
                          for n, c in top_journals],
-            "journal_issns": {n: issns.get(jids.get(n, ""), []) for n, _ in top_journals},
             "institutions": [(n, c, (n in self_insts))
                              for n, c in counters["institutions"].most_common(100)],
             "countries": counters["countries"].most_common(100),
@@ -679,12 +580,10 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
 @app.cell
 def _(mo):
     file = mo.ui.file(filetypes=[".xlsx"], label="Upload your QTS report (.xlsx)")
-    jcr_file = mo.ui.file(filetypes=[".xlsx", ".csv", ".txt", ".tsv"],
-                          label="Optional: JCR export, to show real Impact Factors")
     run = mo.ui.run_button(label="Build my analytics")
     cite_run = mo.ui.run_button(label="Look up who's citing me")
-    mo.vstack([file, jcr_file, run])
-    return cite_run, file, jcr_file, run
+    mo.vstack([file, run])
+    return cite_run, file, run
 
 
 @app.cell
@@ -739,22 +638,6 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, fetch_pubpeer
     (mo.md("### ⚠️ Error while fetching\n\n```\n{}\n```".format(_err)) if _err
      else mo.md("Fetched **{}** of {} papers.".format(len(records), len(_dois))))
     return (records,)
-
-
-@app.cell
-def _(jcr_file, jifs_from_bytes):
-    # Parse the optional JCR export into {journal name: JIF} and {issn: JIF}.
-    jif_map, jif_issn = {}, {}
-    jif_err = ""
-    if jcr_file.value:
-        try:
-            jif_map, jif_issn = jifs_from_bytes(jcr_file.name(), jcr_file.contents())
-            if not jif_map and not jif_issn:
-                jif_err = ("Couldn't find a journal-name and JIF column in that "
-                           "file — is it the JCR export?")
-        except Exception as e:  # noqa: BLE001
-            jif_err = "Couldn't read that file: {}".format(e)
-    return jif_err, jif_issn, jif_map
 
 
 @app.cell
@@ -903,8 +786,7 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
 
 
 @app.cell
-def _(cite_run, citing, country_name, jif_err, jif_issn, jif_map, mo,
-      norm_journal, records):
+def _(cite_run, citing, country_name, mo, records):
     # Separate cell so the (optional) citation lookup doesn't hold up the dashboard.
     mo.stop(not records, mo.md(""))
     if not cite_run.value:
@@ -915,46 +797,18 @@ def _(cite_run, citing, country_name, jif_err, jif_issn, jif_map, mo,
     elif citing is None:
         _view = mo.md("*Looking up who cites your papers…*")
     elif citing.get("journals") or citing.get("institutions"):
-        _issn_of = citing.get("journal_issns", {})
-        _jrows = []
-        _matched = 0
-        for _nm, _ct, _slf, _imp in citing["journals"]:
-            _row = {"Journal": _nm, "Citations": _ct,
-                    "Self (Nature)": "✓" if _slf else ""}
-            if jif_map or jif_issn:
-                _j = jif_map.get(norm_journal(_nm), "")
-                if _j == "":            # fall back to matching on ISSN
-                    for _s in _issn_of.get(_nm, []):
-                        if _s in jif_issn:
-                            _j = jif_issn[_s]
-                            break
-                if _j != "":
-                    _matched += 1
-                _row["JIF (JCR)"] = _j
-            _row["Mean cites/paper (OpenAlex)"] = _imp
-            _jrows.append(_row)
+        _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else ""}
+                  for nm, ct, slf in citing["journals"]]
         _irows = [{"Institution": nm, "Citations": ct, "Self-cite": "✓" if slf else ""}
                   for nm, ct, slf in citing["institutions"]]
         _crows = [{"Country": country_name(cc), "Citations": ct}
                   for cc, ct in citing["countries"]]
         _d = citing.get("_dbg", {})
-        if jif_map or jif_issn:
-            _imp_note = ("*Impact Factors are from your uploaded JCR export "
-                         "(**{}** of {} journals matched by name). "
-                         "“Mean cites/paper” is OpenAlex's open measure — it runs "
-                         "low for journals with lots of front matter, so it is not "
-                         "the JIF.*".format(_matched, len(_jrows)))
-        else:
-            _imp_note = ("*“Mean cites/paper” is OpenAlex's open measure. It is **not** "
-                         "the Journal Impact Factor and runs low for journals with lots "
-                         "of front matter (Nature, Science). Upload a JCR export above "
-                         "to show real Impact Factors.*")
         _note = mo.md(
             "*Captured **{}** citing records across **{}** papers "
-            "(expected ~{} citations) · {} · {} API calls.*<br>{}{}".format(
+            "(expected ~{} citations) · {} · {} API calls.*".format(
                 _d.get("captured"), _d.get("papers"), _d.get("expected"),
-                _d.get("mode"), _d.get("calls"), _imp_note,
-                "<br>*⚠️ {}*".format(jif_err) if jif_err else ""))
+                _d.get("mode"), _d.get("calls")))
         _view = mo.vstack([_note, mo.ui.tabs({
             "Journals": mo.ui.table(_jrows, selection=None, pagination=True, page_size=25),
             "Institutions": mo.ui.table(_irows, selection=None, pagination=True, page_size=25),
