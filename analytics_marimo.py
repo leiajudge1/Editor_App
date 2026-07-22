@@ -271,6 +271,7 @@ def _(IS_WASM, WORKER_URL):
         async def _run(batch_size, report):
             counters = {"journals": Counter(), "institutions": Counter(),
                         "countries": Counter()}
+            jids = {}   # journal display name -> OpenAlex source id
             for start in range(0, len(cited), batch_size):
                 chunk = cited[start:start + batch_size]
                 filt = "|".join(w for w, _ in chunk)
@@ -279,13 +280,15 @@ def _(IS_WASM, WORKER_URL):
                         key = g.get("key_display_name") or g.get("key")
                         if key and str(key).lower() not in ("unknown", "none"):
                             counters[name][key] += g.get("count", 0)
+                            if name == "journals" and g.get("key"):
+                                jids.setdefault(key, str(g["key"]).rsplit("/", 1)[-1])
                 if report and progress:
                     for _ in chunk:
                         progress()
                 await asyncio.sleep(0)
-            return counters
+            return counters, jids
 
-        counters = await _run(BATCH, report=True)
+        counters, jids = await _run(BATCH, report=True)
         captured = sum(counters["journals"].values())
         _dbg["captured"] = captured
 
@@ -293,12 +296,36 @@ def _(IS_WASM, WORKER_URL):
         if expected and captured < MIN_COVERAGE * expected:
             _dbg["mode"] = "per-paper fallback"
             _dbg["batched_captured"] = captured
-            counters = await _run(1, report=False)
+            counters, jids = await _run(1, report=False)
             _dbg["captured"] = sum(counters["journals"].values())
 
+        top_journals = counters["journals"].most_common(100)
+
+        # Journal-level impact: OpenAlex "2-year mean citedness" — computed the
+        # same way as an impact factor (the JIF itself is proprietary Clarivate
+        # data and has no open API). ~2 extra calls for 100 journals.
+        impact = {}
+        wanted = [jids[n] for n, _ in top_journals if jids.get(n)]
+        for start in range(0, len(wanted), 50):
+            ids = "|".join(wanted[start:start + 50])
+            url = ("https://api.openalex.org/sources?filter=ids.openalex:{}"
+                   "&select=id,summary_stats&per-page=50&mailto={}".format(ids, MAILTO))
+            data = None
+            for _try in range(3):
+                data = await _oa_json(url)
+                if data is not None:
+                    break
+            _dbg["calls"] += 1
+            for s in ((data or {}).get("results") or []):
+                sid = str(s.get("id") or "").rsplit("/", 1)[-1]
+                val = (s.get("summary_stats") or {}).get("2yr_mean_citedness")
+                if sid and isinstance(val, (int, float)):
+                    impact[sid] = round(val, 1)
+
         return {
-            "journals": [(n, c, ("nature" in str(n).lower()))
-                         for n, c in counters["journals"].most_common(100)],
+            "journals": [(n, c, ("nature" in str(n).lower()),
+                          impact.get(jids.get(n, ""), ""))
+                         for n, c in top_journals],
             "institutions": [(n, c, (n in self_insts))
                              for n, c in counters["institutions"].most_common(100)],
             "countries": counters["countries"].most_common(100),
@@ -792,8 +819,9 @@ def _(cite_run, citing, country_name, mo, records):
     elif citing is None:
         _view = mo.md("*Looking up who cites your papers…*")
     elif citing.get("journals") or citing.get("institutions"):
-        _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else ""}
-                  for nm, ct, slf in citing["journals"]]
+        _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else "",
+                   "2-yr mean citedness": imp}
+                  for nm, ct, slf, imp in citing["journals"]]
         _irows = [{"Institution": nm, "Citations": ct, "Self-cite": "✓" if slf else ""}
                   for nm, ct, slf in citing["institutions"]]
         _crows = [{"Country": country_name(cc), "Citations": ct}
@@ -801,7 +829,10 @@ def _(cite_run, citing, country_name, mo, records):
         _d = citing.get("_dbg", {})
         _note = mo.md(
             "*Captured **{}** citing records across **{}** papers "
-            "(expected ~{} citations) · {} · {} API calls.*".format(
+            "(expected ~{} citations) · {} · {} API calls.*<br>"
+            "*“2-yr mean citedness” is OpenAlex's open impact measure, calculated "
+            "like an impact factor; the Journal Impact Factor itself is proprietary "
+            "to Clarivate and has no open API.*".format(
                 _d.get("captured"), _d.get("papers"), _d.get("expected"),
                 _d.get("mode"), _d.get("calls")))
         _view = mo.vstack([_note, mo.ui.tabs({
