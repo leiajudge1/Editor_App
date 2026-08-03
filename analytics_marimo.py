@@ -33,18 +33,20 @@ def _(mo):
         """
         # Editor portfolio analytics
 
-        Upload a file containing a list of DOIs. This can be easily obtained for papers that have been sent to production at the following link, which can be filtered by editor name: https://qts.springernature.com/ncomms.php?jnum=41467&doi=&msnum=&status=&sort=published&ip=on 
-        Simply download the Excel file (top right button) and upload it here. 
+        Upload a file containing a list of DOIs. This can be easily obtained for papers that have been sent to production at the following link, which can be filtered by editor name:
 
-        - **scientific spread** — an interactive topic wheel (filter by subfield), plus field/subfield/topic tables
-        - **performance** — citations, FWCI and Altmetric, with field-normalised percentiles, in sortable tables and a citations × FWCI × Altmetric bubble chart
-        - **PubPeer** — comments and retraction / expression-of-concern flags
-        - **collaboration reach**, **top-10 countries**, and **monthly trends**
-        - optional **who's citing you** — journals, institutions, countries and the top citing papers
+        https://qts.springernature.com/ncomms.php?jnum=41467&doi=&msnum=&status=&sort=published&ip=on
+
+        Simply download the Excel file (top right button) and upload it here.
+
+        - scientific spread - an interactive topic wheel (filter by subfield), plus field/subfield/topic tables
+        - performance - citations, FWCI and Altmetric, with field-normalised percentiles, in sortable tables and a citations x FWCI x Altmetric bubble chart
+        - PubPeer - comments and retraction / expression-of-concern flags
+        - collaboration reach, top-10 countries, and monthly trends
+        - optional who's citing you - journals, institutions, countries and the top citing papers
         """
     )
     return
-
 
 @app.cell
 def _():
