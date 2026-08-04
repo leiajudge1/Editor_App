@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install marimo
-        run: pip install marimo
+        run: pip install marimo uv
       - name: Export notebook to WebAssembly
         run: marimo export html-wasm analytics_marimo.py -o _site --mode run
       - name: Upload Pages artifact
