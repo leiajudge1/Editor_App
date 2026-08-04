@@ -33,7 +33,7 @@ def _(mo):
         """
         # Editor portfolio analytics
 
-        Upload a file containing a list of DOIs. This can be easily obtained for papers that have been sent to production at the following link, which can be filtered by editor name:
+        Upload any file containing a list of DOIs. This can be easily obtained for papers that have been sent to production at the following link, which can be filtered by editor name:
 
         https://qts.springernature.com/ncomms.php?jnum=41467&doi=&msnum=&status=&sort=published&ip=on
 
