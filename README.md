@@ -1,8 +1,7 @@
 # Editor analytics — serverless web app (marimo + GitHub Pages)
 
 A browser-based analytics dashboard for editors. Upload a **QTS report** and get
-a full picture of the papers you've handled — computed entirely **in your
-browser** via WebAssembly, so the uploaded file never leaves your machine.
+a full picture of the papers you've handled.
 
 ## What it shows
 
@@ -44,10 +43,7 @@ WORKER_SETUP.md                            <- how to deploy that Worker
 
 - **OpenAlex** (open, no key) powers spread, citations, FWCI, percentiles,
   geography, trends and the citation lookup. Requests use a contact email to sit
-  in OpenAlex's "polite pool". OpenAlex now has a **daily free credit budget** —
-  the core dashboard fits comfortably, but the **"who's citing you"** lookup makes
-  a call per cited paper, so it's **opt-in** (a button) to avoid burning credits;
-  the budget resets at midnight UTC.
+  in OpenAlex's "polite pool". 
 - **Altmetric** — optional; needs the small Cloudflare Worker in `WORKER_SETUP.md`
   (it holds the Explorer key server-side) and its URL pasted into `WORKER_URL` near
   the top of the notebook. Without it, the Altmetric column is blank.
@@ -64,10 +60,3 @@ marimo edit analytics_marimo.py                       # edit interactively
 marimo export html-wasm analytics_marimo.py -o _site --mode run
 python -m http.server --directory _site               # preview the browser build
 ```
-
-**marimo gotchas** (if you edit it): imports that packages need go at the **top of
-a cell** (not inside functions) so they're bundled; every variable may be defined
-in **only one cell**; packages Pyodide doesn't ship (openpyxl, plotly) need an
-explicit `micropip.install`; and long `await` loops need `asyncio.sleep(0)` to let
-the progress bar repaint. Keep slow/optional fetches in their **own cell** so they
-don't hold up the rest of the dashboard.
