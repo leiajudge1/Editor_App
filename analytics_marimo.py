@@ -22,7 +22,7 @@ async def _():
     # first.
     if IS_WASM:
         import micropip
-        await micropip.install(["openpyxl", "plotly"])
+        await micropip.install(["openpyxl", "plotly==5.24.1"])
     openpyxl_ready = True
     return IS_WASM, io, openpyxl_ready, traceback
 
