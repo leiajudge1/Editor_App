@@ -41,9 +41,11 @@ def _(mo):
 
         - scientific spread - an interactive topic wheel (filter by subfield), plus field/subfield/topic tables
         - performance - citations, FWCI and Altmetric, with field-normalised percentiles, in sortable tables and a citations x FWCI x Altmetric bubble chart
-        - PubPeer - comments and retraction / expression-of-concern flags
         - collaboration reach, top-10 countries, and monthly trends
+        - optional PubPeer check - comments and retraction / expression-of-concern flags
         - optional who's citing you - journals, institutions, countries and the top citing papers
+
+        Tick the optional extras you want before pressing **Build my analytics**.
         """
     )
     return
@@ -577,18 +579,25 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
 
 @app.cell
 def _(mo):
+    # ── Upload + optional extras ──────────────────────────────────────────────
     file = mo.ui.file(filetypes=[".xlsx"], label="Upload your QTS report (.xlsx)")
+    pubpeer_cb = mo.ui.checkbox(
+        label="Check PubPeer for comments and retraction / expression-of-concern flags",
+        value=False)
+    citing_cb = mo.ui.checkbox(
+        label="Include who's-citing-me analysis (journals, institutions, countries; "
+              "makes extra OpenAlex calls)",
+        value=False)
     run = mo.ui.run_button(label="Build my analytics")
-    cite_run = mo.ui.run_button(label="Look up who's citing me")
-    mo.vstack([file, run])
-    return cite_run, file, run
+    mo.vstack([file, mo.md("**Optional extras**"), pubpeer_cb, citing_cb, run])
+    return citing_cb, file, pubpeer_cb, run
 
 
 @app.cell
-async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, fetch_pubpeer, extract, file, mo, run, traceback, WORKER_URL):
+async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, extract, file, mo, run, traceback, WORKER_URL):
     # Gate the heavy work behind the button + an uploaded file.
     import asyncio
-    mo.stop(not run.value, mo.md("*Upload your QTS report, then press **Build my analytics**.*"))
+    mo.stop(not run.value, mo.md("*Upload your QTS report, tick any optional extras, then press **Build my analytics**.*"))
     mo.stop(not file.value, mo.md("⚠️ No file uploaded yet."))
 
     records = []
@@ -618,18 +627,6 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, fetch_pubpeer
                         _scores = {}
                 for r in records:
                     r["altmetric"] = _scores.get(r["doi"].lower())
-            # PubPeer comments (direct browser call; non-fatal if blocked)
-            if records:
-                with mo.status.spinner(title="Checking PubPeer…"):
-                    try:
-                        _pp = await fetch_pubpeer([r["doi"] for r in records])
-                    except Exception:
-                        _pp = {}
-                for r in records:
-                    _info = _pp.get(r["doi"].lower()) or {}
-                    r["pp_comments"] = _info.get("comments", 0)
-                    r["pp_url"] = _info.get("url", "")
-                    r["pp_flag"] = _info.get("flag", "")
     except Exception:
         _err = traceback.format_exc()
 
@@ -639,9 +636,10 @@ async def _(dois_from_xlsx_bytes, fetch_altmetric, fetch_openalex, fetch_pubpeer
 
 
 @app.cell
-async def _(cite_run, fetch_citing, mo, records):
+async def _(citing_cb, fetch_citing, mo, records):
+    # Only runs the citing lookup if the box is ticked.
     citing = None
-    if records and cite_run.value:
+    if records and citing_cb.value:
         _items = [(r["oa_id"], r["citations"] or 0) for r in records]
         _self_insts = set()
         for _r in records:
@@ -655,6 +653,19 @@ async def _(cite_run, fetch_citing, mo, records):
             except Exception:
                 citing = None
     return (citing,)
+
+
+@app.cell
+async def _(fetch_pubpeer, mo, pubpeer_cb, records):
+    # Only runs the PubPeer lookup if the box is ticked.
+    pubpeer = None
+    if records and pubpeer_cb.value:
+        with mo.status.spinner(title="Checking PubPeer…"):
+            try:
+                pubpeer = await fetch_pubpeer([r["doi"] for r in records])
+            except Exception:
+                pubpeer = {}
+    return (pubpeer,)
 
 
 @app.cell
@@ -725,23 +736,6 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
                           filename="portfolio_analytics.xlsx",
                           label="Download full workbook (.xlsx)")
 
-        # PubPeer comments (papers with any comments/flags)
-        _pprows = sorted(
-            [{"DOI": r["doi"], "Title": r["title"],
-              "Comments": r.get("pp_comments", 0), "Flag": r.get("pp_flag", ""),
-              "Link": r.get("pp_url", "")}
-             for r in records if r.get("pp_comments")],
-            key=lambda x: x["Comments"], reverse=True)
-        if _pprows:
-            _pp_view = mo.ui.table(
-                _pprows, selection=None, pagination=True, page_size=25,
-                format_mapping={
-                    "DOI": lambda v: mo.md("[{}](https://doi.org/{})".format(v, v)),
-                    "Link": lambda v: mo.md("[PubPeer]({})".format(v)) if v else ""})
-        else:
-            _pp_view = mo.md("*No PubPeer comments found on these papers (or PubPeer "
-                             "wasn't reachable from this network).*")
-
         # Benchmarks (field/year-normalised percentiles)
         _bs = bench_summary(records)
         _bench = mo.md("**Field-normalised standing:** **{}** in the top 1% · "
@@ -762,7 +756,6 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
 
         _out = mo.vstack([
             _summary, _bench,
-            mo.md("### PubPeer comments"), _pp_view,
             mo.md("### Citations × FWCI × Altmetric"),
             mo.md("*Each bubble is a paper. Bubble area = Altmetric score, so "
                   "outliers stand out. Hover for details; **drag a box** over "
@@ -784,15 +777,36 @@ def _(bench_summary, bubble, build_xlsx, collab_stats, country_fig,
 
 
 @app.cell
-def _(cite_run, citing, country_name, mo, records):
-    # Separate cell so the (optional) citation lookup doesn't hold up the dashboard.
-    mo.stop(not records, mo.md(""))
-    if not cite_run.value:
-        _view = mo.vstack([
-            mo.md("*Optional — this makes extra OpenAlex calls (which draw on your "
-                  "daily free credits), so it's off by default. Press to run it.*"),
-            cite_run])
-    elif citing is None:
+def _(mo, pubpeer, pubpeer_cb, records):
+    # Shown only if the PubPeer box is ticked.
+    mo.stop(not records or not pubpeer_cb.value, mo.md(""))
+    _pp = pubpeer or {}
+    _rows = sorted(
+        [{"DOI": r["doi"], "Title": r["title"],
+          "Comments": _pp.get(r["doi"].lower(), {}).get("comments", 0),
+          "Flag": _pp.get(r["doi"].lower(), {}).get("flag", ""),
+          "Link": _pp.get(r["doi"].lower(), {}).get("url", "")}
+         for r in records
+         if _pp.get(r["doi"].lower(), {}).get("comments")],
+        key=lambda x: x["Comments"], reverse=True)
+    if _rows:
+        _view = mo.ui.table(
+            _rows, selection=None, pagination=True, page_size=25,
+            format_mapping={
+                "DOI": lambda v: mo.md("[{}](https://doi.org/{})".format(v, v)),
+                "Link": lambda v: mo.md("[PubPeer]({})".format(v)) if v else ""})
+    else:
+        _view = mo.md("*No PubPeer comments found on these papers (or PubPeer "
+                      "wasn't reachable from this network).*")
+    mo.vstack([mo.md("### PubPeer comments"), _view])
+    return
+
+
+@app.cell
+def _(citing, citing_cb, country_name, mo, records):
+    # Shown only if the citing box is ticked.
+    mo.stop(not records or not citing_cb.value, mo.md(""))
+    if citing is None:
         _view = mo.md("*Looking up who cites your papers…*")
     elif citing.get("journals") or citing.get("institutions"):
         _jrows = [{"Journal": nm, "Citations": ct, "Self (Nature)": "✓" if slf else ""}
