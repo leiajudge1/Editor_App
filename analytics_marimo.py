@@ -367,39 +367,16 @@ def _(IS_WASM, WORKER_URL):
 
 
 @app.cell
-def _(WHEEL_TOP_N, ZISSOU1, country_name, io, openpyxl_ready):
+def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
     # ── Analysis + rendering (pure, no network) ───────────────────────────────
-    import math
     from collections import Counter
     import numpy as np
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LinearSegmentedColormap
     import plotly.graph_objects as go
     from openpyxl import Workbook
     from openpyxl.styles import Font
-
-    # Plotly colour stops built explicitly from the palette (named scales can
-    # misbehave in the Pyodide build, explicit stops always work).
-    ZISSOU_STOPS = [[i / (len(ZISSOU1) - 1), c] for i, c in enumerate(ZISSOU1)]
-    _zissou_cmap = LinearSegmentedColormap.from_list("zissou1", ZISSOU1)
-
-    def zissou_palette(n):
-        # n colours sampled along the Zissou1 gradient, then shuffled with a
-        # coprime stride so neighbouring wedges contrast with each other.
-        if n <= 1:
-            return [_zissou_cmap(0.0)]
-        base = [_zissou_cmap(i / (n - 1)) for i in range(n)]
-        step = max(2, int(round(n * 0.382)))
-        while math.gcd(step, n) != 1:
-            step += 1
-        return [base[(i * step) % n] for i in range(n)]
-
-    def _label_colour(rgba):
-        # Dark text on the yellow/gold wedges, white on the teal/red ones.
-        lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-        return "#1F2A30" if lum > 0.6 else "white"
 
     def summarise(records):
         n = len(records)
@@ -444,8 +421,11 @@ def _(WHEEL_TOP_N, ZISSOU1, country_name, io, openpyxl_ready):
         counts = [tc[t] for t in selected]
         if not selected:
             return None
-        # One colour per topic, sampled from the Zissou1 gradient.
-        colors = zissou_palette(len(selected))
+        # A distinct colour per topic: stitch together several qualitative maps.
+        palette = []
+        for cmap_name in ("tab20", "tab20b", "tab20c"):
+            palette.extend(plt.get_cmap(cmap_name).colors)
+        colors = [palette[i % len(palette)] for i in range(len(selected))]
 
         ang = np.linspace(0, 2 * np.pi, len(selected), endpoint=False)
         rmax = max(counts)
@@ -454,16 +434,15 @@ def _(WHEEL_TOP_N, ZISSOU1, country_name, io, openpyxl_ready):
         ax.set_theta_offset(np.pi / 2)
         ax.set_theta_direction(-1)
         ax.bar(ang, counts, width=(2 * np.pi / len(selected)) * 0.95,
-               color=colors, edgecolor="white", linewidth=1.0, alpha=0.95)
+               color=colors, edgecolor="white", linewidth=1.0, alpha=0.9)
         ax.set_xticks([])
         ax.set_yticklabels([])
         ax.spines["polar"].set_visible(False)
         ax.set_ylim(0, rmax * 1.10)
-        for i, (a, c) in enumerate(zip(ang, counts)):
+        for a, c in zip(ang, counts):
             if c >= max(2, rmax * 0.25):
                 ax.text(a, c / 2, str(c), ha="center", va="center",
-                        fontsize=6.5, color=_label_colour(colors[i]),
-                        weight="bold")
+                        fontsize=6.5, color="white", weight="bold")
         # Legend of topics (truncate long names so it stays readable).
         def _short(t):
             return t if len(t) <= 42 else t[:39] + "…"
@@ -475,7 +454,7 @@ def _(WHEEL_TOP_N, ZISSOU1, country_name, io, openpyxl_ready):
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
         ax.set_title("Portfolio by topic ({}){}".format(shown, scope),
-                     fontsize=13, pad=24, weight="bold", color="#1F2A30")
+                     fontsize=13, pad=24, weight="bold")
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
         plt.close(fig)
