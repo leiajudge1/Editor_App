@@ -511,7 +511,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         fig = go.Figure(go.Scatter(
             x=xs, y=ys, mode="markers",
             marker=dict(size=raw, sizemode="area", sizeref=sizeref, sizemin=FLOOR,
-                        color=ys, colorscale="Plasma", showscale=False,
+                        color=ys, colorscale="Magma", showscale=False,
                         line=dict(width=0.5, color="white"), opacity=0.7),
             customdata=cdata, text=texts,
             hovertemplate=("<b>%{text}</b><br>Citations: %{x}<br>FWCI: %{y:.2f}"
