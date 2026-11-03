@@ -53,10 +53,7 @@ def _(mo):
 @app.cell
 def _():
     # ── Config ────────────────────────────────────────────────────────────────
-    # Zissou1 palette (Wes Anderson, "The Life Aquatic"):
-    #   teal, light blue, yellow, gold, red
-    ZISSOU1 = ["#3B9AB2", "#78B7C5", "#EBCC2A", "#E1AF00", "#F21A00"]
-    BRAND = "3B9AB2"
+    BRAND = "5B2C6F"
     RECENT_DAYS = 60
     TOP_N = 12
     WHEEL_TOP_N = 32
@@ -77,8 +74,7 @@ def _():
         "AR": "Argentina", "CL": "Chile", "IR": "Iran", "TH": "Thailand",
         "MY": "Malaysia", "LU": "Luxembourg", "SI": "Slovenia", "EE": "Estonia",
     }
-    return (BRAND, COUNTRY_NAMES, RECENT_DAYS, TOP_N, WHEEL_TOP_N, WORKER_URL,
-            ZISSOU1)
+    return BRAND, COUNTRY_NAMES, RECENT_DAYS, TOP_N, WHEEL_TOP_N, WORKER_URL
 
 
 @app.cell
@@ -515,8 +511,8 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         fig = go.Figure(go.Scatter(
             x=xs, y=ys, mode="markers",
             marker=dict(size=raw, sizemode="area", sizeref=sizeref, sizemin=FLOOR,
-                        color=ys, colorscale=ZISSOU_STOPS, showscale=False,
-                        line=dict(width=0.5, color="white"), opacity=0.8),
+                        color=ys, colorscale="Viridis", showscale=False,
+                        line=dict(width=0.5, color="white"), opacity=0.7),
             customdata=cdata, text=texts,
             hovertemplate=("<b>%{text}</b><br>Citations: %{x}<br>FWCI: %{y:.2f}"
                            "<br>Altmetric: %{customdata[1]}<extra></extra>")))
@@ -530,7 +526,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         top = cc.most_common(10)[::-1]
         fig = go.Figure(go.Bar(
             x=[n for _, n in top], y=[country_name(c) for c, _ in top],
-            orientation="h", marker_color=ZISSOU1[0],
+            orientation="h", marker_color="#5B2C6F",
             hovertemplate="%{y}: %{x} papers<extra></extra>"))
         fig.update_layout(height=380, template="simple_white",
                           xaxis_title="Papers", margin=dict(l=10, r=10, t=10, b=30))
@@ -565,10 +561,9 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
             fs = [r["fwci"] for r in by_month[m] if isinstance(r["fwci"], (int, float))]
             med.append(round(statistics.median(fs), 2) if fs else None)
         fig = go.Figure()
-        fig.add_bar(x=months, y=counts, name="Papers", marker_color=ZISSOU1[1])
+        fig.add_bar(x=months, y=counts, name="Papers", marker_color="#B7A4CE")
         fig.add_scatter(x=months, y=med, name="Median FWCI", mode="lines+markers",
-                        line=dict(color=ZISSOU1[4], width=3),
-                        marker=dict(color=ZISSOU1[4]), yaxis="y2")
+                        line=dict(color="#5B2C6F", width=3), yaxis="y2")
         fig.update_layout(height=380, template="simple_white",
                           xaxis=dict(title="Month", type="category"),
                           yaxis=dict(title="Papers"),
