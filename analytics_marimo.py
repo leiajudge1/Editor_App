@@ -53,7 +53,10 @@ def _(mo):
 @app.cell
 def _():
     # ── Config ────────────────────────────────────────────────────────────────
-    BRAND = "5B2C6F"
+    # Zissou1 palette (Wes Anderson, "The Life Aquatic"):
+    #   teal, light blue, yellow, gold, red
+    ZISSOU1 = ["#3B9AB2", "#78B7C5", "#EBCC2A", "#E1AF00", "#F21A00"]
+    BRAND = "3B9AB2"
     RECENT_DAYS = 60
     TOP_N = 12
     WHEEL_TOP_N = 32
@@ -74,7 +77,8 @@ def _():
         "AR": "Argentina", "CL": "Chile", "IR": "Iran", "TH": "Thailand",
         "MY": "Malaysia", "LU": "Luxembourg", "SI": "Slovenia", "EE": "Estonia",
     }
-    return BRAND, COUNTRY_NAMES, RECENT_DAYS, TOP_N, WHEEL_TOP_N, WORKER_URL
+    return (BRAND, COUNTRY_NAMES, RECENT_DAYS, TOP_N, WHEEL_TOP_N, WORKER_URL,
+            ZISSOU1)
 
 
 @app.cell
@@ -363,16 +367,39 @@ def _(IS_WASM, WORKER_URL):
 
 
 @app.cell
-def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
+def _(WHEEL_TOP_N, ZISSOU1, country_name, io, openpyxl_ready):
     # ── Analysis + rendering (pure, no network) ───────────────────────────────
+    import math
     from collections import Counter
     import numpy as np
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
     import plotly.graph_objects as go
     from openpyxl import Workbook
     from openpyxl.styles import Font
+
+    # Plotly colour stops built explicitly from the palette (named scales can
+    # misbehave in the Pyodide build, explicit stops always work).
+    ZISSOU_STOPS = [[i / (len(ZISSOU1) - 1), c] for i, c in enumerate(ZISSOU1)]
+    _zissou_cmap = LinearSegmentedColormap.from_list("zissou1", ZISSOU1)
+
+    def zissou_palette(n):
+        # n colours sampled along the Zissou1 gradient, then shuffled with a
+        # coprime stride so neighbouring wedges contrast with each other.
+        if n <= 1:
+            return [_zissou_cmap(0.0)]
+        base = [_zissou_cmap(i / (n - 1)) for i in range(n)]
+        step = max(2, int(round(n * 0.382)))
+        while math.gcd(step, n) != 1:
+            step += 1
+        return [base[(i * step) % n] for i in range(n)]
+
+    def _label_colour(rgba):
+        # Dark text on the yellow/gold wedges, white on the teal/red ones.
+        lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+        return "#1F2A30" if lum > 0.6 else "white"
 
     def summarise(records):
         n = len(records)
@@ -417,11 +444,8 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         counts = [tc[t] for t in selected]
         if not selected:
             return None
-        # A distinct colour per topic: stitch together several qualitative maps.
-        palette = []
-        for cmap_name in ("tab20", "tab20b", "tab20c"):
-            palette.extend(plt.get_cmap(cmap_name).colors)
-        colors = [palette[i % len(palette)] for i in range(len(selected))]
+        # One colour per topic, sampled from the Zissou1 gradient.
+        colors = zissou_palette(len(selected))
 
         ang = np.linspace(0, 2 * np.pi, len(selected), endpoint=False)
         rmax = max(counts)
@@ -430,15 +454,16 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         ax.set_theta_offset(np.pi / 2)
         ax.set_theta_direction(-1)
         ax.bar(ang, counts, width=(2 * np.pi / len(selected)) * 0.95,
-               color=colors, edgecolor="white", linewidth=1.0, alpha=0.9)
+               color=colors, edgecolor="white", linewidth=1.0, alpha=0.95)
         ax.set_xticks([])
         ax.set_yticklabels([])
         ax.spines["polar"].set_visible(False)
         ax.set_ylim(0, rmax * 1.10)
-        for a, c in zip(ang, counts):
+        for i, (a, c) in enumerate(zip(ang, counts)):
             if c >= max(2, rmax * 0.25):
                 ax.text(a, c / 2, str(c), ha="center", va="center",
-                        fontsize=6.5, color="white", weight="bold")
+                        fontsize=6.5, color=_label_colour(colors[i]),
+                        weight="bold")
         # Legend of topics (truncate long names so it stays readable).
         def _short(t):
             return t if len(t) <= 42 else t[:39] + "…"
@@ -450,7 +475,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         shown = "top {} of {}".format(len(selected), total) if total > len(selected) else "all {}".format(len(selected))
         scope = "" if (not only_subfield or only_subfield == "All") else " — {}".format(only_subfield)
         ax.set_title("Portfolio by topic ({}){}".format(shown, scope),
-                     fontsize=13, pad=24, weight="bold")
+                     fontsize=13, pad=24, weight="bold", color="#1F2A30")
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
         plt.close(fig)
@@ -511,11 +536,8 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         fig = go.Figure(go.Scatter(
             x=xs, y=ys, mode="markers",
             marker=dict(size=raw, sizemode="area", sizeref=sizeref, sizemin=FLOOR,
-            color=ys,
-            colorscale=[[0.0, "#3B9AB2"], [0.25, "#78B7C5"], [0.5, "#EBCC2A"],
-                        [0.75, "#E1AF00"], [1.0, "#F21A00"]],
-            showscale=False,
-            line=dict(width=0.5, color="white"), opacity=0.7),
+                        color=ys, colorscale=ZISSOU_STOPS, showscale=False,
+                        line=dict(width=0.5, color="white"), opacity=0.8),
             customdata=cdata, text=texts,
             hovertemplate=("<b>%{text}</b><br>Citations: %{x}<br>FWCI: %{y:.2f}"
                            "<br>Altmetric: %{customdata[1]}<extra></extra>")))
@@ -529,7 +551,7 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
         top = cc.most_common(10)[::-1]
         fig = go.Figure(go.Bar(
             x=[n for _, n in top], y=[country_name(c) for c, _ in top],
-            orientation="h", marker_color="#5B2C6F",
+            orientation="h", marker_color=ZISSOU1[0],
             hovertemplate="%{y}: %{x} papers<extra></extra>"))
         fig.update_layout(height=380, template="simple_white",
                           xaxis_title="Papers", margin=dict(l=10, r=10, t=10, b=30))
@@ -564,9 +586,10 @@ def _(WHEEL_TOP_N, country_name, io, openpyxl_ready):
             fs = [r["fwci"] for r in by_month[m] if isinstance(r["fwci"], (int, float))]
             med.append(round(statistics.median(fs), 2) if fs else None)
         fig = go.Figure()
-        fig.add_bar(x=months, y=counts, name="Papers", marker_color="#B7A4CE")
+        fig.add_bar(x=months, y=counts, name="Papers", marker_color=ZISSOU1[1])
         fig.add_scatter(x=months, y=med, name="Median FWCI", mode="lines+markers",
-                        line=dict(color="#5B2C6F", width=3), yaxis="y2")
+                        line=dict(color=ZISSOU1[4], width=3),
+                        marker=dict(color=ZISSOU1[4]), yaxis="y2")
         fig.update_layout(height=380, template="simple_white",
                           xaxis=dict(title="Month", type="category"),
                           yaxis=dict(title="Papers"),
